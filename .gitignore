@@ -1,0 +1,65 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# --- Virtual environments ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- Packaging / tooling ---
+pip-wheel-metadata/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.pyre/
+*.log
+
+# --- IDEs / Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# --- Project artifacts (runtime outputs) ---
+artifacts/
+outputs/
+crops/
+vis/
+runs/
+tmp/
+
+# --- Model weights / downloads / caches ---
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+*.mlmodel
+*.weights
+
+# Cache dirs (we'll default to ~/.cache/raceocr but keep local too)
+.cache/
+.cache-raceocr/
+raceocr_cache/
+
+# --- Data ---
+*.zip
+*.tar
+*.tar.gz
+*.7z
+data/
+datasets/
+samples/
