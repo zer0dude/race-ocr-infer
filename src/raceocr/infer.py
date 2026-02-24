@@ -131,3 +131,72 @@ def detections_to_dict(dets: List[Detection]) -> List[Dict[str, Any]]:
         }
         for d in dets
     ]
+
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def padded_xyxy(
+    xyxy: Tuple[float, float, float, float],
+    pad_frac: float,
+    img_w: int,
+    img_h: int,
+) -> Tuple[int, int, int, int]:
+    x1, y1, x2, y2 = xyxy
+    bw = max(1.0, x2 - x1)
+    bh = max(1.0, y2 - y1)
+
+    px = bw * pad_frac
+    py = bh * pad_frac
+
+    nx1 = int(clamp(x1 - px, 0, img_w - 1))
+    ny1 = int(clamp(y1 - py, 0, img_h - 1))
+    nx2 = int(clamp(x2 + px, 0, img_w - 1))
+    ny2 = int(clamp(y2 + py, 0, img_h - 1))
+
+    # Ensure valid box
+    if nx2 <= nx1:
+        nx2 = min(img_w - 1, nx1 + 1)
+    if ny2 <= ny1:
+        ny2 = min(img_h - 1, ny1 + 1)
+
+    return nx1, ny1, nx2, ny2
+
+
+def save_crops(
+    img_path: Path,
+    detections: List[Detection],
+    crops_dir: Path,
+    pad_frac: float,
+) -> List[Dict[str, Any]]:
+    """
+    Saves crops for each detection and returns crop metadata list.
+    """
+    im = Image.open(img_path).convert("RGB")
+    w, h = im.size
+
+    crops_dir.mkdir(parents=True, exist_ok=True)
+
+    crop_meta: List[Dict[str, Any]] = []
+    for i, d in enumerate(detections):
+        cx1, cy1, cx2, cy2 = padded_xyxy(d.xyxy, pad_frac, w, h)
+        crop = im.crop((cx1, cy1, cx2, cy2))
+
+        # filename includes rank index, class, conf
+        fn = f"{img_path.stem}_det{i:03d}_c{d.cls_id}_{d.cls_name}_conf{d.conf:.3f}.jpg"
+        out_path = crops_dir / fn
+        crop.save(out_path)
+
+        crop_meta.append(
+            {
+                "det_index": i,
+                "cls_id": d.cls_id,
+                "cls_name": d.cls_name,
+                "conf": d.conf,
+                "xyxy": list(d.xyxy),
+                "xyxy_padded": [cx1, cy1, cx2, cy2],
+                "crop_path": str(out_path),
+            }
+        )
+
+    return crop_meta

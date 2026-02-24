@@ -118,6 +118,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Save a visualization image with YOLO boxes.",
     )
+    p_infer.add_argument(
+    "--save-crops",
+    action="store_true",
+    help="Save cropped detection regions to artifacts/crops/.",
+    )
+    p_infer.add_argument(
+        "--pad",
+        type=float,
+        default=0.08,
+        help="Crop padding as fraction of box size (default: 0.08).",
+    )
 
     # ---- album ----
     p_album = subparsers.add_parser(
@@ -247,6 +258,18 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         vis_path = vis_dir / f"{img_path.stem}_yolo.jpg"
         render_detections(img_path, dets, vis_path)
 
+    crop_meta = None
+    if args.save_crops or args.debug:
+        crops_dir = run_dir / "crops"
+        from .infer import save_crops
+
+        crop_meta = save_crops(
+            img_path=img_path,
+            detections=dets,
+            crops_dir=crops_dir,
+            pad_frac=float(args.pad),
+        )
+
     results = {
         "mode": "infer",
         "input_image_path": str(img_path),
@@ -262,6 +285,11 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         "vis_path": str(vis_path) if vis_path else None,
         "ocr_candidates": [],
         "notes": "YOLO detections implemented (Step 4). OCR comes next.",
+        "crops": crop_meta if crop_meta is not None else [],
+        "crop_settings": {
+            "pad_frac": float(args.pad),
+            "saved": bool(args.save_crops or args.debug)
+        },
     }
     write_results(run_dir, results)
 
