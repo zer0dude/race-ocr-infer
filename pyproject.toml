@@ -8,7 +8,7 @@ version = "0.0.1"
 description = "Race OCR inference CLI (YOLO + PaddleOCR)"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["ultralytics>=8.3,<9", "pillow>=10,<12"]
 
 [project.scripts]
 raceocr = "raceocr.cli:main"

@@ -85,6 +85,39 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Debug mode (save extra artifacts).",
     )
+    p_infer.add_argument(
+        "--yolo-weights",
+        default=None,
+        help="Path to YOLO weights. Default: cached weights from `raceocr setup`.",
+    )
+    p_infer.add_argument(
+        "--yolo-conf",
+        type=float,
+        default=0.25,
+        help="YOLO confidence threshold (default: 0.25).",
+    )
+    p_infer.add_argument(
+        "--yolo-iou",
+        type=float,
+        default=0.45,
+        help="YOLO IoU threshold (default: 0.45).",
+    )
+    p_infer.add_argument(
+        "--imgsz",
+        type=int,
+        default=1280,
+        help="YOLO inference image size (default: 1280).",
+    )
+    p_infer.add_argument(
+        "--device",
+        default=None,
+        help='Device for YOLO (e.g. "cpu", "0", "cuda:0"). Default: Ultralytics auto.',
+    )
+    p_infer.add_argument(
+        "--save-vis",
+        action="store_true",
+        help="Save a visualization image with YOLO boxes.",
+    )
 
     # ---- album ----
     p_album = subparsers.add_parser(
@@ -158,24 +191,120 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 
 
 def _cmd_infer(args: argparse.Namespace) -> int:
-    print("[infer] placeholder")
-    print(f"  img={args.img}")
-    print(f"  out_dir={args.out_dir}")
-    print(f"  ocr_conf={args.ocr_conf}")
-    print(f"  filter_words={args.filter_words}")
-    print(f"  filter_words_file={args.filter_words_file}")
-    print(f"  verbose={args.verbose} debug={args.debug}")
+    from pathlib import Path
+
+    from .config import default_cache_dir, yolo_cache_path
+    from .infer import detections_to_dict, load_yolo, render_detections, run_yolo_detect
+    from .io import make_run_dir, write_params, write_results
+    from .util import get_env_info
+
+    img_path = Path(args.img)
+    input_label = img_path.stem if img_path.name else "image"
+
+    run_dir = make_run_dir("infer", input_label, args.out_dir)
+
+    params = {
+        "command": "infer",
+        "img": str(img_path),
+        "out_dir": str(args.out_dir),
+        "ocr_conf": args.ocr_conf,
+        "filter_words": args.filter_words,
+        "filter_words_file": args.filter_words_file,
+        "verbose": bool(args.verbose),
+        "debug": bool(args.debug),
+        "yolo_weights": args.yolo_weights,
+        "yolo_conf": float(args.yolo_conf),
+        "yolo_iou": float(args.yolo_iou),
+        "imgsz": int(args.imgsz),
+        "device": args.device,
+        "save_vis": bool(args.save_vis),
+        "env": get_env_info(),
+        "artifact_dir": str(run_dir),
+    }
+    write_params(run_dir, params)
+
+    # Resolve weights
+    weights_path = Path(args.yolo_weights) if args.yolo_weights else yolo_cache_path(default_cache_dir())
+    if not weights_path.exists():
+        raise SystemExit(
+            f"YOLO weights not found at {weights_path}. Run `raceocr setup` or pass --yolo-weights."
+        )
+
+    # Run YOLO
+    model = load_yolo(weights_path)
+    dets = run_yolo_detect(
+        model=model,
+        img_path=img_path,
+        conf=float(args.yolo_conf),
+        iou=float(args.yolo_iou),
+        imgsz=int(args.imgsz),
+        device=args.device,
+    )
+
+    vis_path = None
+    if args.save_vis:
+        vis_dir = run_dir / "vis"
+        vis_path = vis_dir / f"{img_path.stem}_yolo.jpg"
+        render_detections(img_path, dets, vis_path)
+
+    results = {
+        "mode": "infer",
+        "input_image_path": str(img_path),
+        "artifact_dir": str(run_dir),
+        "yolo": {
+            "weights": str(weights_path),
+            "conf": float(args.yolo_conf),
+            "iou": float(args.yolo_iou),
+            "imgsz": int(args.imgsz),
+            "device": args.device,
+        },
+        "detections": detections_to_dict(dets),
+        "vis_path": str(vis_path) if vis_path else None,
+        "ocr_candidates": [],
+        "notes": "YOLO detections implemented (Step 4). OCR comes next.",
+    }
+    write_results(run_dir, results)
+
+    print(f"[infer] wrote artifacts to: {run_dir}")
     return 0
 
 
 def _cmd_album(args: argparse.Namespace) -> int:
-    print("[album] placeholder")
-    print(f"  dir={args.dir}")
-    print(f"  out_dir={args.out_dir}")
-    print(f"  ocr_conf={args.ocr_conf}")
-    print(f"  filter_words={args.filter_words}")
-    print(f"  filter_words_file={args.filter_words_file}")
-    print(f"  verbose={args.verbose} debug={args.debug}")
+    from pathlib import Path
+
+    from .io import make_run_dir, write_params, write_results
+    from .util import get_env_info
+
+    dir_path = Path(args.dir)
+    input_label = dir_path.name if dir_path.name else "album"
+
+    run_dir = make_run_dir("album", input_label, args.out_dir)
+
+    params = {
+        "command": "album",
+        "dir": str(dir_path),
+        "out_dir": str(args.out_dir),
+        "ocr_conf": args.ocr_conf,
+        "filter_words": args.filter_words,
+        "filter_words_file": args.filter_words_file,
+        "verbose": bool(args.verbose),
+        "debug": bool(args.debug),
+        "env": get_env_info(),
+        "artifact_dir": str(run_dir),
+    }
+    write_params(run_dir, params)
+
+    results = {
+        "mode": "album",
+        "input_folder_path": str(dir_path),
+        "artifact_dir": str(run_dir),
+        "num_images": 0,
+        "ranked_counts": [],
+        "notes": "Album placeholder (Step 4). Aggregation comes later.",
+    }
+    write_results(run_dir, results)
+
+    print(f"[album] wrote artifacts to: {run_dir}")
     return 0
 
 
