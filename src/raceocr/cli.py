@@ -33,6 +33,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="URL to YOLO weights (default will be configured later).",
     )
+    p_setup.add_argument(
+        "--yolo-sha256",
+        default=None,
+        help="Expected sha256 for YOLO weights (optional, recommended).",
+    )
+    p_setup.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-download of YOLO weights even if present.",
+    )
 
     # ---- infer ----
     p_infer = subparsers.add_parser(
@@ -122,88 +132,50 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_setup(args: argparse.Namespace) -> int:
-    print("[setup] placeholder")
-    print(f"  cache_dir={args.cache_dir}")
-    print(f"  yolo_url={args.yolo_url}")
+    from pathlib import Path
+
+    from .config import DEFAULT_YOLO_URL, default_cache_dir, yolo_cache_path
+    from .setup import ensure_yolo_weights
+
+    cache_dir = Path(args.cache_dir) if args.cache_dir else default_cache_dir()
+    yolo_url = args.yolo_url or DEFAULT_YOLO_URL
+    yolo_dest = yolo_cache_path(cache_dir)
+
+    print("[setup] preparing cache")
+    print(f"  cache_dir: {cache_dir}")
+    print(f"  yolo_url:  {yolo_url}")
+    print(f"  yolo_dest: {yolo_dest}")
+
+    path = ensure_yolo_weights(
+        url=yolo_url,
+        dest=yolo_dest,
+        sha256=args.yolo_sha256,
+        force=bool(args.force),
+    )
+
+    print(f"[setup] YOLO weights ready: {path} ({path.stat().st_size} bytes)")
     return 0
 
 
 def _cmd_infer(args: argparse.Namespace) -> int:
-    from pathlib import Path
-
-    from .io import make_run_dir, write_params, write_results
-    from .util import get_env_info
-
-    img_path = Path(args.img)
-    input_label = img_path.stem if img_path.name else "image"
-
-    run_dir = make_run_dir("infer", input_label, args.out_dir)
-
-    params = {
-        "command": "infer",
-        "img": str(img_path),
-        "out_dir": str(args.out_dir),
-        "ocr_conf": args.ocr_conf,
-        "filter_words": args.filter_words,
-        "filter_words_file": args.filter_words_file,
-        "verbose": bool(args.verbose),
-        "debug": bool(args.debug),
-        "env": get_env_info(),
-        "artifact_dir": str(run_dir),
-    }
-    write_params(run_dir, params)
-
-    # Placeholder results schema (v0)
-    results = {
-        "mode": "infer",
-        "input_image_path": str(img_path),
-        "artifact_dir": str(run_dir),
-        "detections": [],
-        "ocr_candidates": [],
-        "notes": "placeholder results (Step 2).",
-    }
-    write_results(run_dir, results)
-
-    print(f"[infer] wrote artifacts to: {run_dir}")
+    print("[infer] placeholder")
+    print(f"  img={args.img}")
+    print(f"  out_dir={args.out_dir}")
+    print(f"  ocr_conf={args.ocr_conf}")
+    print(f"  filter_words={args.filter_words}")
+    print(f"  filter_words_file={args.filter_words_file}")
+    print(f"  verbose={args.verbose} debug={args.debug}")
     return 0
 
 
 def _cmd_album(args: argparse.Namespace) -> int:
-    from pathlib import Path
-
-    from .io import make_run_dir, write_params, write_results
-    from .util import get_env_info
-
-    dir_path = Path(args.dir)
-    input_label = dir_path.name if dir_path.name else "album"
-
-    run_dir = make_run_dir("album", input_label, args.out_dir)
-
-    params = {
-        "command": "album",
-        "dir": str(dir_path),
-        "out_dir": str(args.out_dir),
-        "ocr_conf": args.ocr_conf,
-        "filter_words": args.filter_words,
-        "filter_words_file": args.filter_words_file,
-        "verbose": bool(args.verbose),
-        "debug": bool(args.debug),
-        "env": get_env_info(),
-        "artifact_dir": str(run_dir),
-    }
-    write_params(run_dir, params)
-
-    results = {
-        "mode": "album",
-        "input_folder_path": str(dir_path),
-        "artifact_dir": str(run_dir),
-        "num_images": 0,
-        "ranked_counts": [],
-        "notes": "placeholder results (Step 2).",
-    }
-    write_results(run_dir, results)
-
-    print(f"[album] wrote artifacts to: {run_dir}")
+    print("[album] placeholder")
+    print(f"  dir={args.dir}")
+    print(f"  out_dir={args.out_dir}")
+    print(f"  ocr_conf={args.ocr_conf}")
+    print(f"  filter_words={args.filter_words}")
+    print(f"  filter_words_file={args.filter_words_file}")
+    print(f"  verbose={args.verbose} debug={args.debug}")
     return 0
 
 
