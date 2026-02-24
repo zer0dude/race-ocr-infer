@@ -38,9 +38,45 @@ def ensure_dir(path: Path) -> Path:
 
 
 def write_json(path: Path, obj: Any) -> None:
+    """
+    JSON writer that safely handles numpy arrays/scalars and other non-JSON types.
+    """
+    def to_jsonable(x: Any) -> Any:
+        # Handle numpy types if present (without hard dependency)
+        try:
+            import numpy as np  # type: ignore
+            if isinstance(x, np.ndarray):
+                return x.tolist()
+            if isinstance(x, (np.generic,)):
+                return x.item()
+        except Exception:
+            pass
+
+        # Common python containers
+        if isinstance(x, dict):
+            return {str(k): to_jsonable(v) for k, v in x.items()}
+        if isinstance(x, (list, tuple)):
+            return [to_jsonable(v) for v in x]
+        if isinstance(x, set):
+            return [to_jsonable(v) for v in sorted(x)]
+
+        # Path-like
+        try:
+            from pathlib import Path as _Path
+            if isinstance(x, _Path):
+                return str(x)
+        except Exception:
+            pass
+
+        # Fallback: primitives or string
+        if isinstance(x, (str, int, float, bool)) or x is None:
+            return x
+        return str(x)
+
     ensure_dir(path.parent)
     with path.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+        json.dump(to_jsonable(obj), f, ensure_ascii=False, indent=2)
+        
 
 
 def get_env_info() -> Dict[str, Any]:

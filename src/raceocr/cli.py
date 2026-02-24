@@ -129,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.01,
         help="Crop padding as fraction of box size (default: 0.01).",
     )
+    p_infer.add_argument(
+        "--ocr-device",
+        default="cpu",
+        choices=["gpu", "cpu"],
+        help='Device for PaddleOCR (default: "cpu").',
+    )
 
     # ---- album ----
     p_album = subparsers.add_parser(
@@ -270,6 +276,24 @@ def _cmd_infer(args: argparse.Namespace) -> int:
             pad_frac=float(args.pad),
         )
 
+    from .infer import (
+        init_paddle_ocr,
+        load_filter_words,
+        run_ocr_on_crop_paths,
+    )
+
+    filter_words_lc = load_filter_words(args.filter_words, args.filter_words_file)
+
+    # init OCR with cpu as standard to avoid cuda conficts with YOLO
+    ocr = init_paddle_ocr(device="cpu")
+
+    ocr_candidates = run_ocr_on_crop_paths(
+        ocr=ocr,
+        crop_meta=crop_meta if crop_meta is not None else [],
+        ocr_conf=float(args.ocr_conf),
+        filter_words_lc=filter_words_lc,
+    )
+
     results = {
         "mode": "infer",
         "input_image_path": str(img_path),
@@ -283,13 +307,17 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         },
         "detections": detections_to_dict(dets),
         "vis_path": str(vis_path) if vis_path else None,
-        "ocr_candidates": [],
-        "notes": "YOLO detections implemented (Step 4). OCR comes next.",
         "crops": crop_meta if crop_meta is not None else [],
         "crop_settings": {
             "pad_frac": float(args.pad),
             "saved": bool(args.save_crops or args.debug)
         },
+        "filter_words_used": filter_words_lc,
+        "ocr": {
+            "conf": float(args.ocr_conf),
+            "device": args.ocr_device,
+        },
+        "ocr_candidates": ocr_candidates,
     }
     write_results(run_dir, results)
 
