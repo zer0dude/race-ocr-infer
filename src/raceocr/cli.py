@@ -126,8 +126,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_infer.add_argument(
         "--pad",
         type=float,
-        default=0.08,
-        help="Crop padding as fraction of box size (default: 0.08).",
+        default=0.01,
+        help="Crop padding as fraction of box size (default: 0.01).",
     )
 
     # ---- album ----
