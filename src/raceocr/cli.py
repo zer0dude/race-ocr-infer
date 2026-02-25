@@ -177,6 +177,56 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Debug mode (save extra artifacts).",
     )
+    p_album.add_argument(
+        "--album-conf-thresh",
+        type=float,
+        default=0.75,
+        help="Album confidence threshold on vote ratio (default: 0.75).",
+    )
+    p_album.add_argument(
+        "--save-vis",
+        action="store_true",
+        help="Save YOLO visualization per image under album artifacts.",
+    )
+    p_album.add_argument(
+        "--save-crops",
+        action="store_true",
+        help="Save YOLO crops per image under album artifacts.",
+    )
+    p_album.add_argument(
+        "--pad",
+        type=float,
+        default=0.01,
+        help="Crop padding as fraction of box size (default: 0.01).",
+    )
+    p_album.add_argument(
+        "--yolo-weights",
+        default=None,
+        help="Path to YOLO weights. Default: cached weights from `raceocr setup`.",
+    )
+    p_album.add_argument(
+        "--yolo-conf",
+        type=float,
+        default=0.25,
+        help="YOLO confidence threshold (default: 0.25).",
+    )
+    p_album.add_argument(
+        "--yolo-iou",
+        type=float,
+        default=0.45,
+        help="YOLO IoU threshold (default: 0.45).",
+    )
+    p_album.add_argument(
+        "--imgsz",
+        type=int,
+        default=1280,
+        help="YOLO inference image size (default: 1280).",
+    )
+    p_album.add_argument(
+        "--device",
+        default=None,
+        help='Device for YOLO (e.g. "cpu", "0", "cuda:0"). Default: Ultralytics auto.',
+    )
 
     return parser
 
@@ -328,21 +378,48 @@ def _cmd_infer(args: argparse.Namespace) -> int:
 def _cmd_album(args: argparse.Namespace) -> int:
     from pathlib import Path
 
+    from .album import aggregate_album, list_images
+    from .config import default_cache_dir, yolo_cache_path
+    from .infer import (
+        init_paddle_ocr,
+        load_filter_words,
+        load_yolo,
+        render_detections,
+        run_ocr_on_crop_paths,
+        run_yolo_detect,
+        save_crops,
+        detections_to_dict,
+    )
     from .io import make_run_dir, write_params, write_results
-    from .util import get_env_info
+    from .util import get_env_info, write_json
 
     dir_path = Path(args.dir)
-    input_label = dir_path.name if dir_path.name else "album"
+    if not dir_path.exists() or not dir_path.is_dir():
+        raise SystemExit(f"Album dir not found or not a directory: {dir_path}")
 
-    run_dir = make_run_dir("album", input_label, args.out_dir)
+    images = list_images(dir_path)
+    num_images = len(images)
+    if num_images == 0:
+        raise SystemExit(f"No images found in {dir_path}")
+
+    run_dir = make_run_dir("album", dir_path.name or "album", args.out_dir)
 
     params = {
         "command": "album",
         "dir": str(dir_path),
         "out_dir": str(args.out_dir),
-        "ocr_conf": args.ocr_conf,
+        "ocr_conf": float(args.ocr_conf),
         "filter_words": args.filter_words,
         "filter_words_file": args.filter_words_file,
+        "album_conf_thresh": float(args.album_conf_thresh),
+        "save_vis": bool(args.save_vis),
+        "save_crops": bool(args.save_crops),
+        "pad": float(args.pad),
+        "yolo_weights": args.yolo_weights,
+        "yolo_conf": float(args.yolo_conf),
+        "yolo_iou": float(args.yolo_iou),
+        "imgsz": int(args.imgsz),
+        "device": args.device,
         "verbose": bool(args.verbose),
         "debug": bool(args.debug),
         "env": get_env_info(),
@@ -350,17 +427,116 @@ def _cmd_album(args: argparse.Namespace) -> int:
     }
     write_params(run_dir, params)
 
+    # Resolve YOLO weights
+    weights_path = Path(args.yolo_weights) if args.yolo_weights else yolo_cache_path(default_cache_dir())
+    if not weights_path.exists():
+        raise SystemExit(
+            f"YOLO weights not found at {weights_path}. Run `raceocr setup` or pass --yolo-weights."
+        )
+
+    # Init models ONCE
+    yolo = load_yolo(weights_path)
+    ocr = init_paddle_ocr(device="cpu")  # stable default
+    filter_words_lc = load_filter_words(args.filter_words, args.filter_words_file)
+
+    per_image_candidates = {}
+    per_image_summaries_dir = run_dir / "per_image"
+    per_image_summaries_dir.mkdir(parents=True, exist_ok=True)
+
+    for img_path in images:
+        image_id = img_path.name  # stable key
+        img_run_dir = per_image_summaries_dir / img_path.stem
+        img_run_dir.mkdir(parents=True, exist_ok=True)
+
+        # YOLO
+        dets = run_yolo_detect(
+            model=yolo,
+            img_path=img_path,
+            conf=float(args.yolo_conf),
+            iou=float(args.yolo_iou),
+            imgsz=int(args.imgsz),
+            device=args.device,
+        )
+
+        # optional per-image vis
+        vis_path = None
+        if args.save_vis:
+            vis_path = img_run_dir / f"{img_path.stem}_yolo.jpg"
+            render_detections(img_path, dets, vis_path)
+
+        # crops (needed for OCR)
+        crops_meta = save_crops(
+            img_path=img_path,
+            detections=dets,
+            crops_dir=(img_run_dir / "crops"),
+            pad_frac=float(args.pad),
+        )
+
+        # if user doesn't want crops saved, we can delete them later
+        # (for now: keep simple, just keep them if save_crops/debug, otherwise remove files)
+        if not (args.save_crops or args.debug):
+            # remove crop image files to reduce disk usage
+            for cm in crops_meta:
+                p = cm.get("crop_path")
+                if p:
+                    try:
+                        Path(p).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            # still keep metadata
+            for cm in crops_meta:
+                cm["crop_path"] = None
+
+        # OCR on crops
+        ocr_candidates = run_ocr_on_crop_paths(
+            ocr=ocr,
+            crop_meta=crops_meta,
+            ocr_conf=float(args.ocr_conf),
+            filter_words_lc=filter_words_lc,
+        )
+        per_image_candidates[image_id] = ocr_candidates
+
+        # write small per-image summary (debug-friendly)
+        img_summary = {
+            "image": str(img_path),
+            "detections": detections_to_dict(dets),
+            "vis_path": str(vis_path) if vis_path else None,
+            "num_ocr_candidates": len(ocr_candidates),
+            "top_ocr_candidates": ocr_candidates[:10],
+        }
+        write_json(img_run_dir / "summary.json", img_summary)
+
+    # Aggregate across album
+    agg = aggregate_album(
+        per_image_candidates=per_image_candidates,
+        num_images=num_images,
+        album_conf_thresh=float(args.album_conf_thresh),
+    )
+
     results = {
         "mode": "album",
         "input_folder_path": str(dir_path),
         "artifact_dir": str(run_dir),
-        "num_images": 0,
-        "ranked_counts": [],
-        "notes": "Album placeholder (Step 4). Aggregation comes later.",
+        "num_images": num_images,
+        "filter_words_used": filter_words_lc,
+        "yolo": {
+            "weights": str(weights_path),
+            "conf": float(args.yolo_conf),
+            "iou": float(args.yolo_iou),
+            "imgsz": int(args.imgsz),
+            "device": args.device,
+        },
+        "ocr": {
+            "conf": float(args.ocr_conf),
+            "device": "cpu",
+        },
+        **agg,
     }
     write_results(run_dir, results)
 
     print(f"[album] wrote artifacts to: {run_dir}")
+    print(f"[album] best_guess={results.get('best_guess')} ratio={results.get('best_guess_ratio'):.3f} "
+          f"confident={results.get('is_confident')} manual_check={results.get('needs_manual_check')}")
     return 0
 
 
