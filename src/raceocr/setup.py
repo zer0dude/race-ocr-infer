@@ -72,3 +72,36 @@ def ensure_yolo_weights(
             )
 
     return downloaded
+
+def warm_paddleocr_cpu() -> None:
+    """
+    Minimal PaddleOCR warm routine to ensure models are downloaded and the pipeline initializes.
+    Runs on CPU to avoid CUDA/Torch conflicts.
+    """
+    import os
+
+    # Skip Paddle model source connectivity checks (faster/less noisy)
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+    # Optional stability: disable mkldnn if needed in some environments (safe to leave enabled too)
+    # os.environ.setdefault("FLAGS_use_mkldnn", "0")
+
+    from paddleocr import PaddleOCR
+    from PIL import Image
+    import tempfile
+
+    ocr = PaddleOCR(
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=False,
+        lang="en",
+        device="cpu",
+    )
+
+    # Run once on a tiny dummy image to force full pipeline init
+    img = Image.new("RGB", (16, 16), color=(255, 255, 255))
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp:
+        img.save(tmp.name)
+        try:
+            _ = ocr.ocr(tmp.name)
+        except TypeError:
+            _ = ocr.ocr(tmp.name, cls=False)

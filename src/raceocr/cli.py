@@ -43,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force re-download of YOLO weights even if present.",
     )
+    p_setup.add_argument(
+        "--warm-ocr",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Warm PaddleOCR models (default: on). Use --no-warm-ocr to skip.",
+    )
 
     # ---- infer ----
     p_infer = subparsers.add_parser(
@@ -254,6 +260,16 @@ def _cmd_setup(args: argparse.Namespace) -> int:
     )
 
     print(f"[setup] YOLO weights ready: {path} ({path.stat().st_size} bytes)")
+
+    if args.warm_ocr:
+        print("[setup] warming PaddleOCR (cpu)...")
+        from .setup import warm_paddleocr_cpu
+
+        warm_paddleocr_cpu()
+        print("[setup] PaddleOCR warm complete.")
+    else:
+        print("[setup] skipping PaddleOCR warm (per --no-warm-ocr).")
+
     return 0
 
 
