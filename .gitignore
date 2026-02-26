@@ -50,6 +50,7 @@ tests/
 *.tflite
 *.mlmodel
 *.weights
+*.egg-info/
 
 # Cache dirs (we'll default to ~/.cache/raceocr but keep local too)
 .cache/

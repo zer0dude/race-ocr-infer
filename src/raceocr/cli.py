@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- setup ----
     p_setup = subparsers.add_parser(
         "setup",
-        help="Download weights and warm caches (placeholder in v0).",
+        help="Download weights and warm caches.",
     )
     p_setup.add_argument(
         "--cache-dir",
@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- infer ----
     p_infer = subparsers.add_parser(
         "infer",
-        help="Run single-image inference (placeholder in v0).",
+        help="Run single-image inference.",
     )
     p_infer.add_argument(
         "--img",
@@ -145,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- album ----
     p_album = subparsers.add_parser(
         "album",
-        help="Run album/folder inference and aggregate results (placeholder in v0).",
+        help="Run album/folder inference and aggregate results.",
     )
     p_album.add_argument(
         "--dir",

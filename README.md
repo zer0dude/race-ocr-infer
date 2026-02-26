@@ -1,224 +1,271 @@
-Perfect — let’s go **lean**: smallest structure that still enforces good habits (single env, two commands, artifacts, reproducible setup). We can always “split into modules” later when something starts to hurt.
+# raceocr
 
-## Minimal repo skeleton (v0)
+Developed for **zosportu.sk** by **Brian Zelun Jin** (GitHub: **zer0dude**).
 
-```text
-race-ocr-infer/
-  README.md
-  pyproject.toml
-  .gitignore
+`race-ocr-infer` is a CLI tool that reads athlete identifiers from sports event photos using:
+- **YOLO** object detection (race bibs / headbands / bike tags)
+- **PaddleOCR** text recognition
 
-  src/
-    raceocr/
-      __init__.py
-      __main__.py          # python -m raceocr ...
-      cli.py               # CLI entry + subcommands (setup/infer/album)
-      config.py            # defaults + locating cache dirs + manifest constants
-      setup.py             # download weights + warm PaddleOCR
-      infer.py             # single-image pipeline
-      album.py             # folder pipeline + aggregation
-      io.py                # input discovery + JSON writing + artifact dirs
-      util.py              # logging/timing helpers, hashing, small utils
-```
-
-That’s it. No `docs/`, no `tests/` folder yet. We’ll add them when we need them.
-
-### What this skeleton still guarantees
-
-* **One package** `raceocr`
-* **One CLI** with 3 commands:
-
-  * `raceocr setup`
-  * `raceocr infer`
-  * `raceocr album`
-* **One artifacts layout** created by `io.py`
-* Internal files are “modules”, but still minimal count.
+The tool is designed to run on a machine with GPU and CUDA, produce a **compact production JSON** for automation, and generate **debug artifacts** for traceability.
 
 ---
 
-## Minimal CLI spec (v0)
+## What you get
+
+For each run, `raceocr` produces:
+
+1) **Production JSON** (stable contract for downstream systems)  
+   Written to `./runs/` by default.
+
+2) **Artifacts** (debug + traceability)  
+   Written to `./artifacts/` by default. Includes run metadata, (optional) YOLO visualizations, and intermediate files.
+
+---
+
+## Quick start
+
+### 1) Clone and create a virtual environment
+
+```bash
+git clone https://github.com/zer0dude/race-ocr-infer
+cd race-ocr-infer
+
+python -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+```
+
+### 2) Install `raceocr`
+
+```bash
+pip install -e .
+```
+
+### 3) Download weights and warm caches
+
+```bash
+raceocr setup
+```
+
+This:
+- downloads YOLO weights into `~/.cache/raceocr/yolo/best.pt`
+- warms PaddleOCR models on CPU (default) so the first run is fast and predictable
+
+To skip OCR warming:
+
+```bash
+raceocr setup --no-warm-ocr
+```
+
+---
+
+## Usage
+
+### `infer` — single image
+
+```bash
+raceocr infer --img path/to/image.jpg --filter-words "adidas,nike,zona:1"
+```
+
+Optional:
+- create YOLO visualization
+- delete crops after OCR to save disk
+
+```bash
+raceocr infer --img path/to/image.jpg --create-vis --delete-crops --filter-words "adidas,nike,zona:1"
+```
+
+### `album` — folder of images for one athlete
+
+```bash
+raceocr album --dir path/to/album_folder --filter-words "adidas,nike,zona:1"
+```
+
+Optional:
+- create YOLO visualization per image
+- delete crops after OCR to save disk
+
+```bash
+raceocr album --dir path/to/album_folder --create-vis --delete-crops --filter-words "adidas,nike,zona:1"
+```
+
+---
+
+## Production JSON vs Artifacts
+
+### Production JSON (default: `./runs/`)
+
+This is the **automation interface** intended to be downloaded by a client system,
+then used for downstream logic like sorting images and pairing faces with numbers.
+
+You can control location + filename:
+
+- `--runs-dir` (default: `runs`)
+- `--output-name` (optional; defaults to `infer_<stem>_<timestamp>.json` / `album_<folder>_<timestamp>.json`)
+
+#### Production JSON schema: `infer`
+
+Example shape:
+
+```json
+{
+  "orig_img": "data/400/DSC01752.jpg",
+  "boxes": [
+    {
+      "xyxy": [1878.78, 2252.19, 2043.35, 2408.32],
+      "box_confidence": 0.8723,
+      "box_class": "race_bibs",
+      "ocr_result": "243",
+      "ocr_confidence": 0.8919,
+      "ocr_method": "paddleocr",
+      "ocr_candidates": [
+        {"text": "243", "conf": 0.8919}
+      ]
+    }
+  ],
+  "meta": {
+    "yolo_weights": "/home/ubuntu/.cache/raceocr/yolo/best.pt",
+    "yolo_conf": 0.25,
+    "ocr_conf_thresh": 0.75,
+    "filter_words_used": ["adidas", "nike", "zona:1"]
+  }
+}
+```
+
+Notes:
+- `boxes[].xyxy` are the YOLO detection coordinates in **original image space** (important for face-to-number pairing).
+- `ocr_result` is the **best OCR candidate per box** after filtering and confidence threshold.
+- `ocr_candidates` is a short per-box list, ranked by confidence.
+
+#### Production JSON schema: `album`
+
+Example shape:
+
+```json
+{
+  "orig_album": "data/400",
+  "num_images": 7,
+  "best_guess": "400",
+  "best_guess_ratio": 0.8571,
+  "album_conf_thresh": 0.75,
+  "num_guesses_above_thresh": 1,
+  "needs_manual_check": false,
+  "ranked_guesses": [
+    {"text": "400", "count": 6, "total": 7, "ratio": 0.8571},
+    {"text": "413", "count": 3, "total": 7, "ratio": 0.4286}
+  ],
+  "meta": {
+    "ocr_conf_thresh": 0.75,
+    "filter_words_used": ["adidas", "nike", "zona:1"]
+  }
+}
+```
+
+Interpretation:
+- `needs_manual_check = false` means a unique best guess exceeded the configured vote threshold.
+- `needs_manual_check = true` means that no conclusive best guess could be found. Thus, the system advises a manual check. 
+- `ranked_guesses` helps discover persistent non-ID tokens (e.g., sponsors) to add to `--filter-words`.
+
+---
+
+## Full CLI reference
 
 ### `raceocr setup`
 
-Purpose: make a fresh machine ready.
-Flags (v0):
+- `--cache-dir PATH`  
+  Override cache directory (default: `~/.cache/raceocr`)
 
-* `--cache-dir PATH` (default: `~/.cache/raceocr`)
-* `--yolo-url URL` (default: your GitHub weights URL)
-* `--yolo-sha256 HEX` (optional for now; add soon)
-* `--device {cpu,gpu}` (used for Paddle warm start)
+- `--yolo-url URL`  
+  Override YOLO weights URL
 
-Behavior:
+- `--yolo-sha256 HEX`  
+  Optional integrity check for YOLO weights
 
-* download YOLO weights into cache
-* initialize PaddleOCR once to trigger its internal downloads
-* print where everything ended up
+- `--force`  
+  Re-download YOLO weights even if present
+
+- `--warm-ocr / --no-warm-ocr`  
+  Warm PaddleOCR models (default: on)
 
 ### `raceocr infer`
 
-Flags (v0):
+Required:
+- `--img PATH` input image
 
-* `--img PATH`
-* `--out-dir PATH` (default: `./artifacts`)
-* `--filter-words "foo,bar,baz"` and/or `--filter-words-file`
-* `--ocr-conf FLOAT` (default 0.75)
-* `--yolo-weights PATH` (optional; default from cache)
-* `--save-crops` `--save-vis`
-* `--verbose` `--debug`
+Main options:
+- `--ocr-conf FLOAT` (default: `0.75`)
+- `--filter-words "a,b,c"` (comma-separated)
+- `--filter-words-file FILE` (one word per line)
+- `--yolo-weights PATH` (default: cached weights from `raceocr setup`)
+- `--yolo-conf FLOAT` (default: `0.25`)
+- `--yolo-iou FLOAT` (default: `0.45`)
+- `--imgsz INT` (default: `1280`)
+- `--device STR` (YOLO device: `"cpu"`, `"0"`, `"cuda:0"`, etc.; default: Ultralytics auto)
+- `--pad FLOAT` crop padding fraction (default: `0.01`)
+- `--ocr-device {cpu,gpu}` (default: `cpu`)
 
-Output: `results.json` in run folder, includes:
-
-* image path
-* artifact dir
-* ranked OCR candidates with confidences
-* per-detection provenance (so debugging is possible)
+Artifacts / production output:
+- `--out-dir PATH` artifacts directory (default: `./artifacts`)
+- `--create-vis` write visualization image (default: off)
+- `--delete-crops` delete crops after OCR (default: off)
+- `--runs-dir PATH` production JSON directory (default: `./runs`)
+- `--output-name NAME.json` set production JSON filename (optional)
 
 ### `raceocr album`
 
-Flags (v0):
+Required:
+- `--dir PATH` album folder (one athlete)
 
-* `--dir PATH`
-* same `--filter-words`, `--ocr-conf`, `--out-dir`, `--save-*`, `--verbose`
-* aggregation options later (fuzzy grouping, weighted score), but not in v0 unless needed
+Main options:
+- `--album-conf-thresh FLOAT` vote threshold (default: `0.75`)
+- `--ocr-conf FLOAT` (default: `0.75`)
+- `--filter-words "a,b,c"`
+- `--filter-words-file FILE`
+- `--yolo-weights PATH` (default: cached weights)
+- `--yolo-conf FLOAT` (default: `0.25`)
+- `--yolo-iou FLOAT` (default: `0.45`)
+- `--imgsz INT` (default: `1280`)
+- `--device STR` (YOLO device)
+- `--pad FLOAT` crop padding fraction (default: `0.01`)
 
-Output: `results.json` containing:
-
-* folder path
-* artifact dir
-* `ranked_counts`: list of `{text, count, num_images, ratio}`
-
----
-
-## Step-by-step build plan from “repo exists” → working tool
-
-You’ve already completed Step 0 (repo created, Cursor SSH, venv). So we start at Step 1.
-
-### Step 1 — Installable package + CLI stub (no model logic)
-
-Goal: `raceocr --help` works.
-
-Deliverables:
-
-* `pyproject.toml` with entrypoint `raceocr = raceocr.cli:app` (or argparse equivalent)
-* `src/raceocr/__main__.py` so `python -m raceocr` works
-* `cli.py` defines commands: `setup`, `infer`, `album`
-* each command prints resolved args and creates a run folder
-
-✅ Success criteria:
-
-* `pip install -e .`
-* `raceocr setup --help`
-* `raceocr infer --help`
-* `raceocr album --help`
-
-### Step 2 — Artifacts + JSON writer (still no models)
-
-Goal: every run creates a deterministic folder and writes `params.json` + empty `results.json`.
-
-Deliverables:
-
-* `io.py`:
-
-  * `make_run_dir(mode, input_stem, out_dir)`
-  * `write_json(path, obj)`
-* `util.py` basic logger and timer context manager
-
-✅ Success criteria:
-
-* `raceocr infer --img some.jpg` creates `artifacts/run_.../params.json` and a placeholder `results.json`
-
-### Step 3 — `setup` downloads YOLO weights (Paddle warm start optional here)
-
-Goal: `raceocr setup` downloads weights to cache and prints the path.
-
-Deliverables:
-
-* `setup.py`:
-
-  * `download(url, dest)`
-  * store weights as `~/.cache/raceocr/yolo/best.pt` (or similar)
-* In `config.py`, centralize default cache path and default yolo URL.
-
-✅ Success criteria:
-
-* fresh machine: `raceocr setup` ends with “YOLO weights at: …/best.pt”
-
-*(Paddle warm start can be Step 5 if Paddle installs are annoying — we can keep setup lean.)*
-
-### Step 4 — YOLO detect + crop (OCR still stubbed)
-
-Goal: `infer` can produce crops and detection metadata.
-
-Deliverables:
-
-* `infer.py`:
-
-  * load YOLO weights
-  * run detection on image
-  * crop boxes (+ optional padding)
-  * save crops if `--save-crops`
-  * write intermediate JSON with detections + crop paths
-
-✅ Success criteria:
-
-* run on an image and see crop files + JSON with box coords
-
-### Step 5 — PaddleOCR on crops + ranked candidates
-
-Goal: full single-image pipeline works end-to-end.
-
-Deliverables:
-
-* `infer.py` adds:
-
-  * initialize PaddleOCR once
-  * OCR each crop
-  * collect `{text, conf, crop_path, detection_id}`
-  * apply `--ocr-conf`
-* Apply `filter_words`
-
-✅ Success criteria:
-
-* `raceocr infer --img ... --filter-words "ADIDAS,Nike"` outputs ranked OCR list
-
-### Step 6 — Album mode = loop infer over folder + aggregate counts
-
-Goal: folder pipeline produces `3245: 13/19` style output.
-
-Deliverables:
-
-* `album.py`:
-
-  * list image files in dir
-  * reuse YOLO model + OCR instance across images
-  * call a shared internal function (or import `infer.run_infer(image, …)` returning structured results)
-  * aggregate counts (post-filter, post-threshold)
-  * write album results JSON
-
-✅ Success criteria:
-
-* `raceocr album --dir athlete_folder` outputs ranked frequency table
-
-### Step 7 — Make it pleasant + stable (only after it works)
-
-Add only what hurts:
-
-* `--filter-words-file`
-* confidence-weighted aggregation
-* fuzzy grouping for partials / edit distance
-* `--save-vis` overlay images
-* checksums in `setup`
-* minimal tests for `filter_words` and `aggregate_counts`
+Artifacts / production output:
+- `--out-dir PATH` artifacts directory (default: `./artifacts`)
+- `--create-vis` write visualization per image (default: off)
+- `--delete-crops` delete crops after OCR (default: off)
+- `--runs-dir PATH` production JSON directory (default: `./runs`)
+- `--output-name NAME.json` set production JSON filename (optional)
 
 ---
 
-## What I need from you to start Step 1 cleanly (no extra questions)
+## Troubleshooting
 
-Just pick the CLI framework preference:
+### YOLO GPU + PaddleOCR GPU conflicts
 
-* **Option A (leanest):** `argparse` (zero deps)
-* **Option B (nice UX):** `typer` (small dep, great help texts)
+This tool defaults to:
+- **YOLO on GPU** (PyTorch CUDA)
+- **PaddleOCR on CPU**
 
-If you don’t want to decide, I’ll default to **argparse** for minimalism and we can swap later.
+Reason: running YOLO (PyTorch) and PaddleOCR (PaddlePaddle) both on GPU inside a single environment can trigger CUDA/NCCL version conflicts.
+CPU OCR is stable and keeps the project in one environment.
 
-Next message: tell me **argparse or typer**, and I’ll tell you exactly which files to create first and what each should contain (still without pasting full code if you want to stay “skeleton-first”).
+If you later need PaddleOCR GPU inference for speed:
+- consider running PaddleOCR in a **separate environment** (or container) from YOLO, unless the underlying CUDA stack incompatibilities are resolved.
+
+### Where are weights and models stored?
+
+- YOLO weights: `~/.cache/raceocr/yolo/best.pt`
+- PaddleOCR models: cached under the PaddleX / PaddleOCR directories in your home folder (varies by version).
+
+If you want to re-download PaddleOCR models, remove the corresponding cache folders and run `raceocr setup` again.
+
+---
+
+## Licensing and related repositories
+
+- PaddleOCR license: https://github.com/PaddlePaddle/PaddleOCR/blob/main/LICENSE  
+- Ultralytics / YOLO repository (licenses + usage): https://github.com/ultralytics/ultralytics  
+- Training and finetuning work for this specific use case: https://github.com/zer0dude/race-ocr  
+
+In accordance with the model licenses, all derivative work for this project is open and public in these repositories.
+
+---
