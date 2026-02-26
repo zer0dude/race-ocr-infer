@@ -76,16 +76,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="File containing filter words (one per line).",
     )
     p_infer.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Verbose logging.",
-    )
-    p_infer.add_argument(
-        "--debug",
-        action="store_true",
-        help="Debug mode (save extra artifacts).",
-    )
-    p_infer.add_argument(
         "--yolo-weights",
         default=None,
         help="Path to YOLO weights. Default: cached weights from `raceocr setup`.",
@@ -114,14 +104,14 @@ def build_parser() -> argparse.ArgumentParser:
         help='Device for YOLO (e.g. "cpu", "0", "cuda:0"). Default: Ultralytics auto.',
     )
     p_infer.add_argument(
-        "--save-vis",
+        "--create-vis",
         action="store_true",
-        help="Save a visualization image with YOLO boxes.",
+        help="Create YOLO visualization image (default: off).",
     )
     p_infer.add_argument(
-    "--save-crops",
-    action="store_true",
-    help="Save cropped detection regions to artifacts/crops/.",
+        "--delete-crops",
+        action="store_true",
+        help="Delete crop image files after OCR to save disk space (default: off).",
     )
     p_infer.add_argument(
         "--pad",
@@ -134,6 +124,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="cpu",
         choices=["gpu", "cpu"],
         help='Device for PaddleOCR (default: "cpu").',
+    )
+    p_infer.add_argument(
+        "--runs-dir",
+        default="runs",
+        help='Directory to write production JSON (default: ./runs).',
+    )
+    p_infer.add_argument(
+        "--output-name",
+        default=None,
+        help='Optional output JSON name (e.g. "infer_400.json"). Default uses infer_<imgstem>_<timestamp>.json',
     )
 
     # ---- album ----
@@ -168,30 +168,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="File containing filter words (one per line).",
     )
     p_album.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Verbose logging.",
-    )
-    p_album.add_argument(
-        "--debug",
-        action="store_true",
-        help="Debug mode (save extra artifacts).",
-    )
-    p_album.add_argument(
         "--album-conf-thresh",
         type=float,
         default=0.75,
         help="Album confidence threshold on vote ratio (default: 0.75).",
     )
     p_album.add_argument(
-        "--save-vis",
+        "--create-vis",
         action="store_true",
-        help="Save YOLO visualization per image under album artifacts.",
+        help="Create YOLO visualization per image (default: off).",
     )
     p_album.add_argument(
-        "--save-crops",
+        "--delete-crops",
         action="store_true",
-        help="Save YOLO crops per image under album artifacts.",
+        help="Delete crop image files after OCR to save disk space (default: off).",
     )
     p_album.add_argument(
         "--pad",
@@ -226,6 +216,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--device",
         default=None,
         help='Device for YOLO (e.g. "cpu", "0", "cuda:0"). Default: Ultralytics auto.',
+    )
+    p_album.add_argument(
+        "--runs-dir",
+        default="runs",
+        help='Directory to write production JSON (default: ./runs).',
+    )
+    p_album.add_argument(
+        "--output-name",
+        default=None,
+        help='Optional output JSON name (e.g. "album_400.json"). Default uses album_<folder>_<timestamp>.json',
     )
 
     return parser
@@ -277,14 +277,13 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         "ocr_conf": args.ocr_conf,
         "filter_words": args.filter_words,
         "filter_words_file": args.filter_words_file,
-        "verbose": bool(args.verbose),
-        "debug": bool(args.debug),
         "yolo_weights": args.yolo_weights,
         "yolo_conf": float(args.yolo_conf),
         "yolo_iou": float(args.yolo_iou),
+        "create_vis": bool(args.create_vis),
+        "delete_crops": bool(args.delete_crops),
         "imgsz": int(args.imgsz),
         "device": args.device,
-        "save_vis": bool(args.save_vis),
         "env": get_env_info(),
         "artifact_dir": str(run_dir),
     }
@@ -309,22 +308,20 @@ def _cmd_infer(args: argparse.Namespace) -> int:
     )
 
     vis_path = None
-    if args.save_vis:
+    if args.create_vis:
         vis_dir = run_dir / "vis"
         vis_path = vis_dir / f"{img_path.stem}_yolo.jpg"
         render_detections(img_path, dets, vis_path)
 
-    crop_meta = None
-    if args.save_crops or args.debug:
-        crops_dir = run_dir / "crops"
-        from .infer import save_crops
+    from .infer import save_crops
 
-        crop_meta = save_crops(
-            img_path=img_path,
-            detections=dets,
-            crops_dir=crops_dir,
-            pad_frac=float(args.pad),
-        )
+    crops_dir = run_dir / "crops"
+    crop_meta = save_crops(
+        img_path=img_path,
+        detections=dets,
+        crops_dir=crops_dir,
+        pad_frac=float(args.pad),
+    )
 
     from .infer import (
         init_paddle_ocr,
@@ -344,6 +341,16 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         filter_words_lc=filter_words_lc,
     )
 
+    if args.delete_crops:
+        for cm in crop_meta:
+            p = cm.get("crop_path")
+            if p:
+                try:
+                    Path(p).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            cm["crop_path"] = None
+
     results = {
         "mode": "infer",
         "input_image_path": str(img_path),
@@ -357,10 +364,10 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         },
         "detections": detections_to_dict(dets),
         "vis_path": str(vis_path) if vis_path else None,
-        "crops": crop_meta if crop_meta is not None else [],
+        "crops": crop_meta,
         "crop_settings": {
             "pad_frac": float(args.pad),
-            "saved": bool(args.save_crops or args.debug)
+            "deleted_after_ocr": bool(args.delete_crops),
         },
         "filter_words_used": filter_words_lc,
         "ocr": {
@@ -370,6 +377,21 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         "ocr_candidates": ocr_candidates,
     }
     write_results(run_dir, results)
+
+    # --- Production JSON output ---
+    from .production import infer_to_production_json, make_production_out_path, write_production_json
+    prod = infer_to_production_json(results)
+
+    runs_dir = Path(args.runs_dir)
+    out_path = make_production_out_path(
+        mode="infer",
+        input_label=img_path.stem,
+        runs_dir=runs_dir,
+        output_name=args.output_name,
+        include_ts_default=True,
+    )
+    write_production_json(prod, out_path)
+    print(f"[infer] production json: {out_path}")
 
     print(f"[infer] wrote artifacts to: {run_dir}")
     return 0
@@ -412,16 +434,14 @@ def _cmd_album(args: argparse.Namespace) -> int:
         "filter_words": args.filter_words,
         "filter_words_file": args.filter_words_file,
         "album_conf_thresh": float(args.album_conf_thresh),
-        "save_vis": bool(args.save_vis),
-        "save_crops": bool(args.save_crops),
         "pad": float(args.pad),
         "yolo_weights": args.yolo_weights,
         "yolo_conf": float(args.yolo_conf),
         "yolo_iou": float(args.yolo_iou),
         "imgsz": int(args.imgsz),
+        "create_vis": bool(args.create_vis),
+        "delete_crops": bool(args.delete_crops),
         "device": args.device,
-        "verbose": bool(args.verbose),
-        "debug": bool(args.debug),
         "env": get_env_info(),
         "artifact_dir": str(run_dir),
     }
@@ -460,7 +480,7 @@ def _cmd_album(args: argparse.Namespace) -> int:
 
         # optional per-image vis
         vis_path = None
-        if args.save_vis:
+        if args.create_vis:
             vis_path = img_run_dir / f"{img_path.stem}_yolo.jpg"
             render_detections(img_path, dets, vis_path)
 
@@ -472,21 +492,6 @@ def _cmd_album(args: argparse.Namespace) -> int:
             pad_frac=float(args.pad),
         )
 
-        # if user doesn't want crops saved, we can delete them later
-        # (for now: keep simple, just keep them if save_crops/debug, otherwise remove files)
-        if not (args.save_crops or args.debug):
-            # remove crop image files to reduce disk usage
-            for cm in crops_meta:
-                p = cm.get("crop_path")
-                if p:
-                    try:
-                        Path(p).unlink(missing_ok=True)
-                    except Exception:
-                        pass
-            # still keep metadata
-            for cm in crops_meta:
-                cm["crop_path"] = None
-
         # OCR on crops
         ocr_candidates = run_ocr_on_crop_paths(
             ocr=ocr,
@@ -495,6 +500,17 @@ def _cmd_album(args: argparse.Namespace) -> int:
             filter_words_lc=filter_words_lc,
         )
         per_image_candidates[image_id] = ocr_candidates
+
+        # optional delete crops to save space
+        if args.delete_crops:
+            for cm in crops_meta:
+                p = cm.get("crop_path")
+                if p:
+                    try:
+                        Path(p).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                cm["crop_path"] = None
 
         # write small per-image summary (debug-friendly)
         img_summary = {
@@ -534,9 +550,27 @@ def _cmd_album(args: argparse.Namespace) -> int:
     }
     write_results(run_dir, results)
 
+    # --- Production JSON output ---
+    from .production import album_to_production_json, make_production_out_path, write_production_json
+    prod = album_to_production_json(results)
+
+    runs_dir = Path(args.runs_dir)
+    out_path = make_production_out_path(
+        mode="album",
+        input_label=dir_path.name,
+        runs_dir=runs_dir,
+        output_name=args.output_name,
+        include_ts_default=True,
+    )
+    write_production_json(prod, out_path)
+    print(f"[album] production json: {out_path}")
+
     print(f"[album] wrote artifacts to: {run_dir}")
-    print(f"[album] best_guess={results.get('best_guess')} ratio={results.get('best_guess_ratio'):.3f} "
-          f"confident={results.get('is_confident')} manual_check={results.get('needs_manual_check')}")
+    print(
+        f"[album] best_guess={results.get('best_guess')} "
+        f"ratio={results.get('best_guess_ratio'):.3f} "
+        f"manual_check={results.get('needs_manual_check')}"
+    )
     return 0
 
 
