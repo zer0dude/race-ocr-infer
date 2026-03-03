@@ -75,7 +75,10 @@ Optional:
 raceocr infer --img path/to/image.jpg --create-vis --delete-crops --filter-words "adidas,nike,zona:1"
 ```
 
-### `album` — folder of images for one athlete
+### `album` — batch inference over a folder of images
+
+`album` is **batch inferencing mode**: it runs the same pipeline as `infer` over *all images in a folder* (non-recursive),
+then produces a **single stitched production JSON** containing the per-image results.
 
 ```bash
 raceocr album --dir path/to/album_folder --filter-words "adidas,nike,zona:1"
@@ -137,24 +140,48 @@ Notes:
 - `ocr_result` is the **best OCR candidate per box** after filtering and confidence threshold.
 - `ocr_candidates` is a short per-box list, ranked by confidence.
 
-#### Production JSON schema: `album`
+#### Production JSON schema: `album` (batch mode)
+
+`album` stitches together the per-image `infer` outputs (with per-image `meta` removed),
+and adds a single album-level `meta`.
 
 Example shape:
 
 ```json
 {
   "orig_album": "data/400",
-  "num_images": 7,
-  "best_guess": "400",
-  "best_guess_ratio": 0.8571,
-  "album_conf_thresh": 0.75,
-  "num_guesses_above_thresh": 1,
-  "needs_manual_check": false,
-  "ranked_guesses": [
-    {"text": "400", "count": 6, "total": 7, "ratio": 0.8571},
-    {"text": "413", "count": 3, "total": 7, "ratio": 0.4286}
+  "images": [
+    {
+      "orig_img": "data/400/DSC01752.jpg",
+      "boxes": [
+        {
+          "xyxy": [1878.78, 2252.19, 2043.35, 2408.32],
+          "box_confidence": 0.8723,
+          "box_class": "race_bibs",
+          "ocr_result": "243",
+          "ocr_confidence": 0.8919,
+          "ocr_method": "paddleocr",
+          "ocr_candidates": [
+            {"text": "243", "conf": 0.8919}
+          ]
+        }
+      ]
+    },
+    {
+      "orig_img": "data/400/DSC01753.jpg",
+      "boxes": []
+    }
   ],
   "meta": {
+    "num_images_total": 7,
+    "num_images_processed": 7,
+    "num_images_failed": 0,
+    "failed_images": [],
+    "yolo_weights": "/home/ubuntu/.cache/raceocr/yolo/best.pt",
+    "yolo_conf": 0.25,
+    "yolo_iou": 0.45,
+    "imgsz": 1280,
+    "device": null,
     "ocr_conf_thresh": 0.75,
     "filter_words_used": ["adidas", "nike", "zona:1"]
   }
@@ -162,9 +189,9 @@ Example shape:
 ```
 
 Interpretation:
-- `needs_manual_check = false` means a unique best guess exceeded the configured vote threshold.
-- `needs_manual_check = true` means that no conclusive best guess could be found. Thus, the system advises a manual check. 
-- `ranked_guesses` helps discover persistent non-ID tokens (e.g., sponsors) to add to `--filter-words`.
+- `images[]` contains the per-image results in a stable format (`orig_img` + `boxes`).
+- Album-level `meta` summarizes counts and the run configuration.
+- If any image fails, it will be counted in `num_images_failed` and listed in `failed_images` with an error string.
 
 ---
 
@@ -194,6 +221,7 @@ Required:
 
 Main options:
 - `--ocr-conf FLOAT` (default: `0.75`)
+- `--ocr-device {cpu,gpu}` (default: `cpu`)
 - `--filter-words "a,b,c"` (comma-separated)
 - `--filter-words-file FILE` (one word per line)
 - `--yolo-weights PATH` (default: cached weights from `raceocr setup`)
@@ -202,7 +230,6 @@ Main options:
 - `--imgsz INT` (default: `1280`)
 - `--device STR` (YOLO device: `"cpu"`, `"0"`, `"cuda:0"`, etc.; default: Ultralytics auto)
 - `--pad FLOAT` crop padding fraction (default: `0.01`)
-- `--ocr-device {cpu,gpu}` (default: `cpu`)
 
 Artifacts / production output:
 - `--out-dir PATH` artifacts directory (default: `./artifacts`)
@@ -211,14 +238,14 @@ Artifacts / production output:
 - `--runs-dir PATH` production JSON directory (default: `./runs`)
 - `--output-name NAME.json` set production JSON filename (optional)
 
-### `raceocr album`
+### `raceocr album` (batch inferencing mode)
 
 Required:
-- `--dir PATH` album folder (one athlete)
+- `--dir PATH` album folder
 
 Main options:
-- `--album-conf-thresh FLOAT` vote threshold (default: `0.75`)
 - `--ocr-conf FLOAT` (default: `0.75`)
+- `--ocr-device {cpu,gpu}` (default: `cpu`)
 - `--filter-words "a,b,c"`
 - `--filter-words-file FILE`
 - `--yolo-weights PATH` (default: cached weights)
@@ -231,7 +258,7 @@ Main options:
 Artifacts / production output:
 - `--out-dir PATH` artifacts directory (default: `./artifacts`)
 - `--create-vis` write visualization per image (default: off)
-- `--delete-crops` delete crops after OCR (default: off)
+- `--delete-crops` delete crops after OCR to save disk (default: off)
 - `--runs-dir PATH` production JSON directory (default: `./runs`)
 - `--output-name NAME.json` set production JSON filename (optional)
 
@@ -249,7 +276,8 @@ Reason: running YOLO (PyTorch) and PaddleOCR (PaddlePaddle) both on GPU inside a
 CPU OCR is stable and keeps the project in one environment.
 
 If you later need PaddleOCR GPU inference for speed:
-- consider running PaddleOCR in a **separate environment** (or container) from YOLO, unless the underlying CUDA stack incompatibilities are resolved.
+- try `--ocr-device gpu`
+- if you run into CUDA stack conflicts, consider running PaddleOCR in a **separate environment** (or container) from YOLO.
 
 ### Where are weights and models stored?
 
@@ -267,5 +295,3 @@ If you want to re-download PaddleOCR models, remove the corresponding cache fold
 - Training and finetuning work for this specific use case: https://github.com/zer0dude/race-ocr  
 
 In accordance with the model licenses, all derivative work for this project is open and public in these repositories.
-
----
