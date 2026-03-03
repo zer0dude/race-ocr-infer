@@ -56,7 +56,7 @@ def group_ocr_candidates_by_det(ocr_candidates: List[Dict[str, Any]]) -> Dict[in
 
 def infer_to_production_json(results: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Convert internal infer results to a compact production JSON that matches the client's pipeline style.
+    Convert internal infer results to a compact production JSON.
     Expects results dict from cli.py infer run (contains detections + ocr_candidates + filter_words_used + yolo/ocr meta).
     """
     orig_img = results.get("input_image_path") or results.get("orig_img") or ""
@@ -102,35 +102,48 @@ def infer_to_production_json(results: Dict[str, Any]) -> Dict[str, Any]:
 
 def album_to_production_json(results: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Convert internal album results to a compact production JSON.
+    Album mode is a simple batch infer over all images in a folder.
+
+    Output shape:
+      {
+        "orig_album": "<folder>",
+        "images": [ { "orig_img": "...", "boxes": [...] }, ... ],   # per-image meta removed
+        "meta": { ...album-level meta... }
+      }
+
+    Expects `results` produced by cli.py _cmd_album:
+      - results["input_folder_path"]
+      - results["per_image_results"] : list of internal infer-style results dicts
+      - yolo/ocr/filter_words_used + counts
     """
     orig_album = results.get("input_folder_path") or results.get("orig_album") or ""
-    num_images = int(results.get("num_images") or 0)
+    per_image_internal = results.get("per_image_results") or []
 
-    ranked = results.get("ranked_guesses") or []
-    ranked_out = []
-    for r in ranked:
-        text = r.get("canonical", "")
-        count = int(r.get("count_images") or 0)
-        total = int(r.get("num_images") or num_images or 0)
-        ratio = float(r.get("ratio") or 0.0)
-        ranked_out.append({"text": text, "count": count, "total": total, "ratio": ratio})
+    images_out: List[Dict[str, Any]] = []
+    for img_res in per_image_internal:
+        prod = infer_to_production_json(img_res)
+        prod.pop("meta", None)  # remove per-image meta
+        images_out.append(prod)
 
-    meta = {
+    meta_out = {
+        "num_images_total": int(results.get("num_images_total") or 0),
+        "num_images_processed": int(results.get("num_images_processed") or 0),
+        "num_images_failed": int(results.get("num_images_failed") or 0),
+        "failed_images": results.get("failed_images") or [],
+        "yolo_weights": (results.get("yolo") or {}).get("weights"),
+        "yolo_conf": (results.get("yolo") or {}).get("conf"),
+        "yolo_iou": (results.get("yolo") or {}).get("iou"),
+        "imgsz": (results.get("yolo") or {}).get("imgsz"),
+        "device": (results.get("yolo") or {}).get("device"),
         "ocr_conf_thresh": (results.get("ocr") or {}).get("conf"),
         "filter_words_used": results.get("filter_words_used") or [],
     }
 
+    # Keep insertion order: orig_album first, then images, then meta
     return {
         "orig_album": orig_album,
-        "num_images": num_images,
-        "best_guess": results.get("best_guess"),
-        "best_guess_ratio": float(results.get("best_guess_ratio") or 0.0),
-        "album_conf_thresh": float(results.get("album_conf_thresh") or 0.75),
-        "num_guesses_above_thresh": int(results.get("num_guesses_above_thresh") or 0),
-        "needs_manual_check": bool(results.get("needs_manual_check")),
-        "ranked_guesses": ranked_out,
-        "meta": meta,
+        "images": images_out,
+        "meta": meta_out,
     }
 
 

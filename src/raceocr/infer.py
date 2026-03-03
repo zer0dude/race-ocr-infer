@@ -201,7 +201,7 @@ def save_crops(
 
     return crop_meta
 
-def init_paddle_ocr(device: str = "cpu"):
+def init_paddle_ocr(ocr_device: str = "cpu"):
     """
     Initialize PaddleOCR in a 'pretrained-only' config with orientation/unwarp/textline disabled.
     """
@@ -216,7 +216,7 @@ def init_paddle_ocr(device: str = "cpu"):
         use_doc_unwarping=False,
         use_textline_orientation=False,
         lang="en",
-        device=device,
+        device=ocr_device,
     )
 
 
