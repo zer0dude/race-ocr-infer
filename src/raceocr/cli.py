@@ -159,8 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_infer.add_argument(
         "--ocr-conf",
         type=float,
-        default=0.75,
-        help="Minimum OCR confidence to keep (default: 0.75).",
+        default=0.95,
+        help="Minimum OCR confidence to keep (default: 0.95).",
     )
     p_infer.add_argument(
         "--allowed-ids",
@@ -179,6 +179,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_infer.add_argument(
+        "--min-box-area",
+        type=float,
+        default=10000.0,
+        help="Minimum YOLO bounding box area in px^2 to keep in production JSON (default: 10000).",
+    )
+    p_infer.add_argument(
         "--yolo-weights",
         default=None,
         help="Path to YOLO weights. Default: cached weights from `raceocr setup`.",
@@ -186,8 +192,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_infer.add_argument(
         "--yolo-conf",
         type=float,
-        default=0.25,
-        help="YOLO confidence threshold (default: 0.25).",
+        default=0.86,
+        help="YOLO confidence threshold (default: 0.86).",
     )
     p_infer.add_argument(
         "--yolo-iou",
@@ -266,8 +272,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_album.add_argument(
         "--ocr-conf",
         type=float,
-        default=0.75,
-        help="Minimum OCR confidence to keep (default: 0.75).",
+        default=0.95,
+        help="Minimum OCR confidence to keep (default: 0.95).",
     )
     p_album.add_argument(
         "--allowed-ids",
@@ -284,6 +290,12 @@ def build_parser() -> argparse.ArgumentParser:
             "numeric = digits only, alnum = letters+digits only, any = any non-empty text. "
             "Default: numeric."
         ),
+    )
+    p_album.add_argument(
+        "--min-box-area",
+        type=float,
+        default=10000.0,
+        help="Minimum YOLO bounding box area in px^2 to keep in production JSON (default: 10000).",
     )
     p_album.add_argument(
         "--create-vis",
@@ -309,8 +321,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_album.add_argument(
         "--yolo-conf",
         type=float,
-        default=0.25,
-        help="YOLO confidence threshold (default: 0.25).",
+        default=0.86,
+        help="YOLO confidence threshold (default: 0.86).",
     )
     p_album.add_argument(
         "--yolo-iou",
@@ -422,6 +434,7 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         "ocr_conf": args.ocr_conf,
         "allowed_ids": args.allowed_ids,
         "ocr_char_set": args.ocr_char_set,
+        "min_box_area": args.min_box_area,
         "yolo_weights": args.yolo_weights,
         "yolo_conf": float(args.yolo_conf),
         "yolo_iou": float(args.yolo_iou),
@@ -513,6 +526,7 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         "candidate_filter": {
             "allowed_ids": args.allowed_ids,
             "ocr_char_set": args.ocr_char_set,
+            "min_box_area": args.min_box_area,
         },
         "ocr": {
             "conf": float(args.ocr_conf),
@@ -577,6 +591,7 @@ def _cmd_album(args: argparse.Namespace) -> int:
         "ocr_conf": float(args.ocr_conf),
         "allowed_ids": args.allowed_ids,
         "ocr_char_set": args.ocr_char_set,
+        "min_box_area": args.min_box_area,
         "pad": float(args.pad),
         "yolo_weights": args.yolo_weights,
         "yolo_conf": float(args.yolo_conf),
@@ -682,6 +697,7 @@ def _cmd_album(args: argparse.Namespace) -> int:
                 "candidate_filter": {
                     "allowed_ids": args.allowed_ids,
                     "ocr_char_set": args.ocr_char_set,
+                    "min_box_area": args.min_box_area,
                 },
                 "ocr": {
                     "conf": float(args.ocr_conf),
@@ -716,6 +732,7 @@ def _cmd_album(args: argparse.Namespace) -> int:
         "candidate_filter": {
             "allowed_ids": args.allowed_ids,
             "ocr_char_set": args.ocr_char_set,
+            "min_box_area": args.min_box_area,
         },
         "yolo": {
             "weights": str(weights_path),

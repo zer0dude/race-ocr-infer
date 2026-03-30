@@ -43,27 +43,110 @@ def group_ocr_candidates_by_det(ocr_candidates: List[Dict[str, Any]]) -> Dict[in
         det_index = r.get("det_index")
         if det_index is None:
             continue
+
         try:
             det_index = int(det_index)
         except Exception:
             continue
-        by_det.setdefault(det_index, []).append({"text": r.get("text", ""), "conf": float(r.get("conf", 0.0))})
 
-    for k in list(by_det.keys()):
-        by_det[k].sort(key=lambda x: x["conf"], reverse=True)
+        text = str(r.get("text", "") or "").strip()
+        conf = float(r.get("conf", 0.0) or 0.0)
+
+        by_det.setdefault(det_index, []).append(
+            {
+                "text": text,
+                "conf": conf,
+            }
+        )
+
     return by_det
+
+
+def text_allowed_by_char_set(text: str, ocr_char_set: str) -> bool:
+    if not text:
+        return False
+
+    if ocr_char_set == "numeric":
+        return text.isdigit()
+
+    if ocr_char_set == "alnum":
+        return text.isalnum()
+
+    if ocr_char_set == "any":
+        return True
+
+    raise ValueError(f"Unsupported ocr_char_set: {ocr_char_set}")
+
+
+def filter_candidate_list(
+    candidates: List[Dict[str, Any]],
+    allowed_ids: Optional[List[str]],
+    ocr_char_set: str,
+) -> List[Dict[str, Any]]:
+    allowed_set = set(allowed_ids) if allowed_ids else None
+
+    out: List[Dict[str, Any]] = []
+    for c in candidates or []:
+        text = str(c.get("text", "") or "").strip()
+        conf = float(c.get("conf", 0.0) or 0.0)
+
+        if not text:
+            continue
+
+        if allowed_set is not None and text not in allowed_set:
+            continue
+
+        if not text_allowed_by_char_set(text, ocr_char_set):
+            continue
+
+        out.append(
+            {
+                "text": text,
+                "conf": conf,
+            }
+        )
+
+    out.sort(key=lambda x: x["conf"], reverse=True)
+    return out
+
+
+def xyxy_box_area(xyxy: Any) -> float:
+    """
+    Compute bounding box area from [x1, y1, x2, y2].
+    Returns 0.0 on malformed input.
+    """
+    try:
+        if xyxy is None or len(xyxy) != 4:
+            return 0.0
+
+        x1, y1, x2, y2 = [float(v) for v in xyxy]
+        w = max(0.0, x2 - x1)
+        h = max(0.0, y2 - y1)
+        return w * h
+    except Exception:
+        return 0.0
+
+
+def box_passes_area_filter(xyxy: Any, min_box_area: float) -> bool:
+    return xyxy_box_area(xyxy) >= float(min_box_area)
 
 
 def infer_to_production_json(results: Dict[str, Any]) -> Dict[str, Any]:
     """
     Convert internal infer results to a compact production JSON.
-    Expects results dict from cli.py infer run (contains detections + ocr_candidates + filter_words_used + yolo/ocr meta).
+
+    Filtering, candidate sorting, and best-candidate selection are all handled here.
     """
     orig_img = results.get("input_image_path") or results.get("orig_img") or ""
     detections = results.get("detections") or []
     ocr_candidates = results.get("ocr_candidates") or []
 
-    by_det = group_ocr_candidates_by_det(ocr_candidates)
+    candidate_filter = results.get("candidate_filter") or {}
+    allowed_ids = candidate_filter.get("allowed_ids")
+    ocr_char_set = candidate_filter.get("ocr_char_set") or "numeric"
+    min_box_area = float(candidate_filter.get("min_box_area", 10000.0) or 10000.0)
+
+    by_det_raw = group_ocr_candidates_by_det(ocr_candidates)
 
     boxes_out: List[Dict[str, Any]] = []
     for det_idx, det in enumerate(detections):
@@ -71,7 +154,15 @@ def infer_to_production_json(results: Dict[str, Any]) -> Dict[str, Any]:
         box_conf = float(det.get("conf", 0.0))
         cls_name = det.get("cls_name", "")
 
-        cand_list = by_det.get(det_idx, [])
+        if not box_passes_area_filter(xyxy, min_box_area):
+            continue
+
+        raw_candidates = by_det_raw.get(det_idx, [])
+        cand_list = filter_candidate_list(
+            raw_candidates,
+            allowed_ids=allowed_ids,
+            ocr_char_set=ocr_char_set,
+        )
         best = cand_list[0] if cand_list else {"text": "", "conf": 0.0}
 
         boxes_out.append(
@@ -90,7 +181,9 @@ def infer_to_production_json(results: Dict[str, Any]) -> Dict[str, Any]:
         "yolo_weights": (results.get("yolo") or {}).get("weights"),
         "yolo_conf": (results.get("yolo") or {}).get("conf"),
         "ocr_conf_thresh": (results.get("ocr") or {}).get("conf"),
-        "filter_words_used": results.get("filter_words_used") or [],
+        "allowed_ids": allowed_ids,
+        "ocr_char_set": ocr_char_set,
+        "min_box_area": min_box_area,
     }
 
     return {
@@ -103,26 +196,15 @@ def infer_to_production_json(results: Dict[str, Any]) -> Dict[str, Any]:
 def album_to_production_json(results: Dict[str, Any]) -> Dict[str, Any]:
     """
     Album mode is a simple batch infer over all images in a folder.
-
-    Output shape:
-      {
-        "orig_album": "<folder>",
-        "images": [ { "orig_img": "...", "boxes": [...] }, ... ],   # per-image meta removed
-        "meta": { ...album-level meta... }
-      }
-
-    Expects `results` produced by cli.py _cmd_album:
-      - results["input_folder_path"]
-      - results["per_image_results"] : list of internal infer-style results dicts
-      - yolo/ocr/filter_words_used + counts
     """
     orig_album = results.get("input_folder_path") or results.get("orig_album") or ""
     per_image_internal = results.get("per_image_results") or []
+    candidate_filter = results.get("candidate_filter") or {}
 
     images_out: List[Dict[str, Any]] = []
     for img_res in per_image_internal:
         prod = infer_to_production_json(img_res)
-        prod.pop("meta", None)  # remove per-image meta
+        prod.pop("meta", None)
         images_out.append(prod)
 
     meta_out = {
@@ -136,10 +218,11 @@ def album_to_production_json(results: Dict[str, Any]) -> Dict[str, Any]:
         "imgsz": (results.get("yolo") or {}).get("imgsz"),
         "device": (results.get("yolo") or {}).get("device"),
         "ocr_conf_thresh": (results.get("ocr") or {}).get("conf"),
-        "filter_words_used": results.get("filter_words_used") or [],
+        "allowed_ids": candidate_filter.get("allowed_ids"),
+        "ocr_char_set": candidate_filter.get("ocr_char_set") or "numeric",
+        "min_box_area": float(candidate_filter.get("min_box_area", 10000.0) or 10000.0),
     }
 
-    # Keep insertion order: orig_album first, then images, then meta
     return {
         "orig_album": orig_album,
         "images": images_out,

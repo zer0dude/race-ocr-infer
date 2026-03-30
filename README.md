@@ -68,6 +68,7 @@ By default, `infer`:
 - keeps OCR lines above the configured OCR confidence threshold
 - applies OCR candidate filtering in **production conversion**, not during OCR extraction
 - allows only **numeric** OCR results by default
+- removes YOLO boxes smaller than **10000 px²** during production conversion
 
 Minimal example:
 
@@ -91,6 +92,12 @@ Allow alphanumeric OCR results:
 
 ```bash
 raceocr infer --img path/to/image.jpg --ocr-char-set alnum
+```
+
+Override the minimum box area filter:
+
+```bash
+raceocr infer --img path/to/image.jpg --min-box-area 15000
 ```
 
 Create YOLO visualization and delete crops after OCR:
@@ -125,6 +132,12 @@ Allow arbitrary OCR strings:
 
 ```bash
 raceocr album --dir path/to/album_folder --ocr-char-set any
+```
+
+Override the minimum box area filter:
+
+```bash
+raceocr album --dir path/to/album_folder --min-box-area 15000
 ```
 
 Create YOLO visualization per image and delete crops after OCR:
@@ -167,10 +180,11 @@ Example shape:
   ],
   "meta": {
     "yolo_weights": "/home/ubuntu/.cache/raceocr/yolo/best.pt",
-    "yolo_conf": 0.25,
-    "ocr_conf_thresh": 0.75,
+    "yolo_conf": 0.86,
+    "ocr_conf_thresh": 0.95,
     "allowed_ids": ["243", "248", "251"],
-    "ocr_char_set": "numeric"
+    "ocr_char_set": "numeric",
+    "min_box_area": 10000.0
   }
 }
 ```
@@ -179,7 +193,12 @@ Notes:
 - `boxes[].xyxy` are YOLO detection coordinates in **original image space**.
 - `ocr_result` is the **best OCR candidate per box** after production-stage filtering.
 - `ocr_candidates` is the per-box candidate list that survived filtering and is ranked by confidence.
-- If no OCR candidate survives filtering, `ocr_result` is an empty string and `ocr_confidence` is `0.0`.
+- Production filtering includes:
+  - optional ID whitelist filtering via `--allowed-ids`
+  - OCR character-set filtering via `--ocr-char-set`
+  - minimum YOLO box area filtering via `--min-box-area`
+- Boxes smaller than the configured minimum area are removed entirely from production output.
+- If no OCR candidate survives filtering for a remaining box, `ocr_result` is an empty string and `ocr_confidence` is `0.0`.
 
 #### Production JSON schema: `album`
 
@@ -218,13 +237,14 @@ Example shape:
     "num_images_failed": 0,
     "failed_images": [],
     "yolo_weights": "/home/ubuntu/.cache/raceocr/yolo/best.pt",
-    "yolo_conf": 0.25,
+    "yolo_conf": 0.86,
     "yolo_iou": 0.45,
     "imgsz": 1280,
     "device": null,
-    "ocr_conf_thresh": 0.75,
+    "ocr_conf_thresh": 0.95,
     "allowed_ids": ["400"],
-    "ocr_char_set": "numeric"
+    "ocr_char_set": "numeric",
+    "min_box_area": 10000.0
   }
 }
 ```
@@ -233,6 +253,7 @@ Interpretation:
 - `images[]` contains stable per-image results (`orig_img` + `boxes`).
 - Album-level `meta` summarizes counts and run configuration.
 - If any image fails, it is counted in `num_images_failed` and listed in `failed_images` with an error string.
+- The same production filtering rules apply in album mode as in infer mode.
 
 ---
 
@@ -261,12 +282,13 @@ Required:
 - `--img PATH` input image
 
 Main options:
-- `--ocr-conf FLOAT` (default: `0.75`)
+- `--ocr-conf FLOAT` (default: `0.95`)
 - `--allowed-ids "a,b,c"` optional whitelist of valid OCR outputs
 - `--ocr-char-set {numeric,alnum,any}` (default: `numeric`)
+- `--min-box-area FLOAT` minimum YOLO bounding box area in px² kept in production JSON (default: `10000`)
 - `--ocr-device {cpu,gpu}` (default: `cpu`)
 - `--yolo-weights PATH` (default: cached weights from `raceocr setup`)
-- `--yolo-conf FLOAT` (default: `0.25`)
+- `--yolo-conf FLOAT` (default: `0.86`)
 - `--yolo-iou FLOAT` (default: `0.45`)
 - `--yolo-classes {race_bibs,... | 0,... | all}` (default: `race_bibs`)
 - `--imgsz INT` (default: `1280`)
@@ -286,12 +308,13 @@ Required:
 - `--dir PATH` album folder
 
 Main options:
-- `--ocr-conf FLOAT` (default: `0.75`)
+- `--ocr-conf FLOAT` (default: `0.95`)
 - `--allowed-ids "a,b,c"` optional whitelist of valid OCR outputs
 - `--ocr-char-set {numeric,alnum,any}` (default: `numeric`)
+- `--min-box-area FLOAT` minimum YOLO bounding box area in px² kept in production JSON (default: `10000`)
 - `--ocr-device {cpu,gpu}` (default: `cpu`)
 - `--yolo-weights PATH` (default: cached weights)
-- `--yolo-conf FLOAT` (default: `0.25`)
+- `--yolo-conf FLOAT` (default: `0.86`)
 - `--yolo-iou FLOAT` (default: `0.45`)
 - `--yolo-classes {race_bibs,... | 0,... | all}` (default: `race_bibs`)
 - `--imgsz INT` (default: `1280`)
@@ -314,7 +337,7 @@ The tool is intentionally split by responsibility so that OCR extraction, orches
 - `cli.py` is the command-line entrypoint. It parses arguments, orchestrates the run, writes debug artifacts, and calls production conversion at the end.
 - `infer.py` contains the single-image pipeline building blocks: YOLO loading and inference, rendering, crop creation, PaddleOCR initialization, and raw OCR candidate extraction.
 - `album.py` is intentionally small and focused. It provides album-level helpers such as listing input images for folder-based batch processing.
-- `production.py` owns **production-facing post-processing**. This is where OCR candidates are grouped, filtered, sorted, and converted into the final stable JSON contract. Logic such as allowed ID whitelisting, OCR character-set filtering, and choosing `ocr_result` belongs here.
+- `production.py` owns **production-facing post-processing**. This is where OCR candidates are grouped, filtered, sorted, and converted into the final stable JSON contract. Logic such as allowed ID whitelisting, OCR character-set filtering, minimum box area filtering, and choosing `ocr_result` belongs here.
 - `setup.py` defines package installation behavior, while the project’s runtime setup helpers are used to download YOLO weights and warm OCR caches through the `raceocr setup` command.
 
 This factoring is deliberate: `infer.py` extracts evidence, `production.py` decides what counts as a valid production answer, and `cli.py` ties the system together.
