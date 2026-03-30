@@ -18,7 +18,7 @@ For each run, `raceocr` produces:
    Written to `./runs/` by default.
 
 2) **Artifacts** (debug + traceability)  
-   Written to `./artifacts/` by default. Includes run metadata, (optional) YOLO visualizations, and intermediate files.
+   Written to `./artifacts/` by default. Includes run metadata, optional YOLO visualizations, and intermediate files.
 
 ---
 
@@ -49,7 +49,7 @@ raceocr setup
 
 This:
 - downloads YOLO weights into `~/.cache/raceocr/yolo/best.pt`
-- warms PaddleOCR models on CPU (default) so the first run is fast and predictable
+- warms PaddleOCR models on CPU by default so the first run is fast and predictable
 
 To skip OCR warming:
 
@@ -63,33 +63,74 @@ raceocr setup --no-warm-ocr
 
 ### `infer` — single image
 
+By default, `infer`:
+- runs YOLO only on class `race_bibs`
+- keeps OCR lines above the configured OCR confidence threshold
+- applies OCR candidate filtering in **production conversion**, not during OCR extraction
+- allows only **numeric** OCR results by default
+
+Minimal example:
+
 ```bash
-raceocr infer --img path/to/image.jpg --filter-words "adidas,nike,zona:1"
+raceocr infer --img path/to/image.jpg
 ```
 
-Optional:
-- create YOLO visualization
-- delete crops after OCR to save disk
+Use a whitelist of valid IDs for the image:
 
 ```bash
-raceocr infer --img path/to/image.jpg --create-vis --delete-crops --filter-words "adidas,nike,zona:1"
+raceocr infer --img path/to/image.jpg --allowed-ids 243,248,251
+```
+
+Allow all YOLO classes instead of only race bibs:
+
+```bash
+raceocr infer --img path/to/image.jpg --yolo-classes all
+```
+
+Allow alphanumeric OCR results:
+
+```bash
+raceocr infer --img path/to/image.jpg --ocr-char-set alnum
+```
+
+Create YOLO visualization and delete crops after OCR:
+
+```bash
+raceocr infer --img path/to/image.jpg --create-vis --delete-crops
 ```
 
 ### `album` — batch inference over a folder of images
 
-`album` is **batch inferencing mode**: it runs the same pipeline as `infer` over *all images in a folder* (non-recursive),
-then produces a **single stitched production JSON** containing the per-image results.
+`album` is **batch inferencing mode**: it runs the same pipeline as `infer` over all images in a folder (non-recursive), then produces a **single stitched production JSON** containing the per-image results.
+
+Minimal example:
 
 ```bash
-raceocr album --dir path/to/album_folder --filter-words "adidas,nike,zona:1"
+raceocr album --dir path/to/album_folder
 ```
 
-Optional:
-- create YOLO visualization per image
-- delete crops after OCR to save disk
+Use a whitelist of valid IDs for the album:
 
 ```bash
-raceocr album --dir path/to/album_folder --create-vis --delete-crops --filter-words "adidas,nike,zona:1"
+raceocr album --dir path/to/album_folder --allowed-ids 400
+```
+
+Allow all YOLO classes:
+
+```bash
+raceocr album --dir path/to/album_folder --yolo-classes all
+```
+
+Allow arbitrary OCR strings:
+
+```bash
+raceocr album --dir path/to/album_folder --ocr-char-set any
+```
+
+Create YOLO visualization per image and delete crops after OCR:
+
+```bash
+raceocr album --dir path/to/album_folder --create-vis --delete-crops
 ```
 
 ---
@@ -98,11 +139,9 @@ raceocr album --dir path/to/album_folder --create-vis --delete-crops --filter-wo
 
 ### Production JSON (default: `./runs/`)
 
-This is the **automation interface** intended to be downloaded by a client system,
-then used for downstream logic like sorting images and pairing faces with numbers.
+This is the **automation interface** intended to be downloaded by a client system, then used for downstream logic such as sorting images and pairing faces with numbers.
 
-You can control location + filename:
-
+You can control location and filename with:
 - `--runs-dir` (default: `runs`)
 - `--output-name` (optional; defaults to `infer_<stem>_<timestamp>.json` / `album_<folder>_<timestamp>.json`)
 
@@ -122,7 +161,7 @@ Example shape:
       "ocr_confidence": 0.8919,
       "ocr_method": "paddleocr",
       "ocr_candidates": [
-        {"text": "243", "conf": 0.8919}
+        { "text": "243", "conf": 0.8919 }
       ]
     }
   ],
@@ -130,20 +169,21 @@ Example shape:
     "yolo_weights": "/home/ubuntu/.cache/raceocr/yolo/best.pt",
     "yolo_conf": 0.25,
     "ocr_conf_thresh": 0.75,
-    "filter_words_used": ["adidas", "nike", "zona:1"]
+    "allowed_ids": ["243", "248", "251"],
+    "ocr_char_set": "numeric"
   }
 }
 ```
 
 Notes:
-- `boxes[].xyxy` are the YOLO detection coordinates in **original image space** (important for face-to-number pairing).
-- `ocr_result` is the **best OCR candidate per box** after filtering and confidence threshold.
-- `ocr_candidates` is a short per-box list, ranked by confidence.
+- `boxes[].xyxy` are YOLO detection coordinates in **original image space**.
+- `ocr_result` is the **best OCR candidate per box** after production-stage filtering.
+- `ocr_candidates` is the per-box candidate list that survived filtering and is ranked by confidence.
+- If no OCR candidate survives filtering, `ocr_result` is an empty string and `ocr_confidence` is `0.0`.
 
-#### Production JSON schema: `album` (batch mode)
+#### Production JSON schema: `album`
 
-`album` stitches together the per-image `infer` outputs (with per-image `meta` removed),
-and adds a single album-level `meta`.
+`album` stitches together the per-image `infer` outputs with per-image `meta` removed, and adds a single album-level `meta`.
 
 Example shape:
 
@@ -162,7 +202,7 @@ Example shape:
           "ocr_confidence": 0.8919,
           "ocr_method": "paddleocr",
           "ocr_candidates": [
-            {"text": "243", "conf": 0.8919}
+            { "text": "243", "conf": 0.8919 }
           ]
         }
       ]
@@ -183,15 +223,16 @@ Example shape:
     "imgsz": 1280,
     "device": null,
     "ocr_conf_thresh": 0.75,
-    "filter_words_used": ["adidas", "nike", "zona:1"]
+    "allowed_ids": ["400"],
+    "ocr_char_set": "numeric"
   }
 }
 ```
 
 Interpretation:
-- `images[]` contains the per-image results in a stable format (`orig_img` + `boxes`).
-- Album-level `meta` summarizes counts and the run configuration.
-- If any image fails, it will be counted in `num_images_failed` and listed in `failed_images` with an error string.
+- `images[]` contains stable per-image results (`orig_img` + `boxes`).
+- Album-level `meta` summarizes counts and run configuration.
+- If any image fails, it is counted in `num_images_failed` and listed in `failed_images` with an error string.
 
 ---
 
@@ -221,14 +262,15 @@ Required:
 
 Main options:
 - `--ocr-conf FLOAT` (default: `0.75`)
+- `--allowed-ids "a,b,c"` optional whitelist of valid OCR outputs
+- `--ocr-char-set {numeric,alnum,any}` (default: `numeric`)
 - `--ocr-device {cpu,gpu}` (default: `cpu`)
-- `--filter-words "a,b,c"` (comma-separated)
-- `--filter-words-file FILE` (one word per line)
 - `--yolo-weights PATH` (default: cached weights from `raceocr setup`)
 - `--yolo-conf FLOAT` (default: `0.25`)
 - `--yolo-iou FLOAT` (default: `0.45`)
+- `--yolo-classes {race_bibs,... | 0,... | all}` (default: `race_bibs`)
 - `--imgsz INT` (default: `1280`)
-- `--device STR` (YOLO device: `"cpu"`, `"0"`, `"cuda:0"`, etc.; default: Ultralytics auto)
+- `--device STR` for YOLO device such as `"cpu"`, `"0"`, or `"cuda:0"` (default: Ultralytics auto)
 - `--pad FLOAT` crop padding fraction (default: `0.01`)
 
 Artifacts / production output:
@@ -238,21 +280,22 @@ Artifacts / production output:
 - `--runs-dir PATH` production JSON directory (default: `./runs`)
 - `--output-name NAME.json` set production JSON filename (optional)
 
-### `raceocr album` (batch inferencing mode)
+### `raceocr album`
 
 Required:
 - `--dir PATH` album folder
 
 Main options:
 - `--ocr-conf FLOAT` (default: `0.75`)
+- `--allowed-ids "a,b,c"` optional whitelist of valid OCR outputs
+- `--ocr-char-set {numeric,alnum,any}` (default: `numeric`)
 - `--ocr-device {cpu,gpu}` (default: `cpu`)
-- `--filter-words "a,b,c"`
-- `--filter-words-file FILE`
 - `--yolo-weights PATH` (default: cached weights)
 - `--yolo-conf FLOAT` (default: `0.25`)
 - `--yolo-iou FLOAT` (default: `0.45`)
+- `--yolo-classes {race_bibs,... | 0,... | all}` (default: `race_bibs`)
 - `--imgsz INT` (default: `1280`)
-- `--device STR` (YOLO device)
+- `--device STR` for YOLO device
 - `--pad FLOAT` crop padding fraction (default: `0.01`)
 
 Artifacts / production output:
@@ -264,6 +307,20 @@ Artifacts / production output:
 
 ---
 
+## Project structure and responsibilities
+
+The tool is intentionally split by responsibility so that OCR extraction, orchestration, and production formatting remain clearly separated.
+
+- `cli.py` is the command-line entrypoint. It parses arguments, orchestrates the run, writes debug artifacts, and calls production conversion at the end.
+- `infer.py` contains the single-image pipeline building blocks: YOLO loading and inference, rendering, crop creation, PaddleOCR initialization, and raw OCR candidate extraction.
+- `album.py` is intentionally small and focused. It provides album-level helpers such as listing input images for folder-based batch processing.
+- `production.py` owns **production-facing post-processing**. This is where OCR candidates are grouped, filtered, sorted, and converted into the final stable JSON contract. Logic such as allowed ID whitelisting, OCR character-set filtering, and choosing `ocr_result` belongs here.
+- `setup.py` defines package installation behavior, while the project’s runtime setup helpers are used to download YOLO weights and warm OCR caches through the `raceocr setup` command.
+
+This factoring is deliberate: `infer.py` extracts evidence, `production.py` decides what counts as a valid production answer, and `cli.py` ties the system together.
+
+---
+
 ## Troubleshooting
 
 ### YOLO GPU + PaddleOCR GPU conflicts
@@ -272,17 +329,17 @@ This tool defaults to:
 - **YOLO on GPU** (PyTorch CUDA)
 - **PaddleOCR on CPU**
 
-Reason: running YOLO (PyTorch) and PaddleOCR (PaddlePaddle) both on GPU inside a single environment can trigger CUDA/NCCL version conflicts.
+Reason: running YOLO (PyTorch) and PaddleOCR (PaddlePaddle) both on GPU inside a single environment can trigger CUDA or NCCL version conflicts.
 CPU OCR is stable and keeps the project in one environment.
 
 If you later need PaddleOCR GPU inference for speed:
 - try `--ocr-device gpu`
-- if you run into CUDA stack conflicts, consider running PaddleOCR in a **separate environment** (or container) from YOLO.
+- if you run into CUDA stack conflicts, consider running PaddleOCR in a **separate environment** or container from YOLO
 
 ### Where are weights and models stored?
 
 - YOLO weights: `~/.cache/raceocr/yolo/best.pt`
-- PaddleOCR models: cached under the PaddleX / PaddleOCR directories in your home folder (varies by version).
+- PaddleOCR models: cached under the PaddleX or PaddleOCR directories in your home folder, depending on version
 
 If you want to re-download PaddleOCR models, remove the corresponding cache folders and run `raceocr setup` again.
 
@@ -291,7 +348,7 @@ If you want to re-download PaddleOCR models, remove the corresponding cache fold
 ## Licensing and related repositories
 
 - PaddleOCR license: https://github.com/PaddlePaddle/PaddleOCR/blob/main/LICENSE  
-- Ultralytics / YOLO repository (licenses + usage): https://github.com/ultralytics/ultralytics  
+- Ultralytics / YOLO repository (licenses and usage): https://github.com/ultralytics/ultralytics  
 - Training and finetuning work for this specific use case: https://github.com/zer0dude/race-ocr  
 
 In accordance with the model licenses, all derivative work for this project is open and public in these repositories.

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from typing import List, Optional
 
 
@@ -14,7 +13,7 @@ YOLO_CLASS_NAME_TO_ID = {
 
 def parse_yolo_classes(value: str) -> Optional[List[int]]:
     """
-    Parse a yolo class selection string into a list of class IDs.
+    Parse a YOLO class selection string into a list of class IDs.
 
     Supported forms:
       - "all" -> None
@@ -64,6 +63,37 @@ def parse_yolo_classes(value: str) -> Optional[List[int]]:
         class_ids.add(YOLO_CLASS_NAME_TO_ID[part])
 
     return sorted(class_ids)
+
+
+def parse_allowed_ids(value: str) -> Optional[List[str]]:
+    """
+    Parse a comma-separated allowed ID list.
+
+    Examples:
+      - "123,456,789" -> ["123", "456", "789"]
+      - "" -> None
+
+    Returns:
+        None if no restriction should be applied, otherwise a deduplicated list of strings.
+    """
+    if value is None:
+        return None
+
+    raw = value.strip()
+    if not raw:
+        return None
+
+    out: List[str] = []
+    seen = set()
+    for part in raw.split(","):
+        s = part.strip()
+        if not s:
+            continue
+        if s not in seen:
+            out.append(s)
+            seen.add(s)
+
+    return out or None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -133,14 +163,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum OCR confidence to keep (default: 0.75).",
     )
     p_infer.add_argument(
-        "--filter-words",
-        default="",
-        help="Comma-separated list of words to filter from OCR results.",
+        "--allowed-ids",
+        type=parse_allowed_ids,
+        default=None,
+        help="Optional comma-separated whitelist of valid OCR results, e.g. 123,456,789",
     )
     p_infer.add_argument(
-        "--filter-words-file",
-        default=None,
-        help="File containing filter words (one per line).",
+        "--ocr-char-set",
+        default="numeric",
+        choices=["numeric", "alnum", "any"],
+        help=(
+            "Allowed OCR character set. "
+            "numeric = digits only, alnum = letters+digits only, any = any non-empty text. "
+            "Default: numeric."
+        ),
     )
     p_infer.add_argument(
         "--yolo-weights",
@@ -234,14 +270,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum OCR confidence to keep (default: 0.75).",
     )
     p_album.add_argument(
-        "--filter-words",
-        default="",
-        help="Comma-separated list of words to filter from OCR results.",
+        "--allowed-ids",
+        type=parse_allowed_ids,
+        default=None,
+        help="Optional comma-separated whitelist of valid OCR results, e.g. 123,456,789",
     )
     p_album.add_argument(
-        "--filter-words-file",
-        default=None,
-        help="File containing filter words (one per line).",
+        "--ocr-char-set",
+        default="numeric",
+        choices=["numeric", "alnum", "any"],
+        help=(
+            "Allowed OCR character set. "
+            "numeric = digits only, alnum = letters+digits only, any = any non-empty text. "
+            "Default: numeric."
+        ),
     )
     p_album.add_argument(
         "--create-vis",
@@ -356,7 +398,15 @@ def _cmd_infer(args: argparse.Namespace) -> int:
     from pathlib import Path
 
     from .config import default_cache_dir, yolo_cache_path
-    from .infer import detections_to_dict, load_yolo, render_detections, run_yolo_detect
+    from .infer import (
+        detections_to_dict,
+        init_paddle_ocr,
+        load_yolo,
+        render_detections,
+        run_ocr_on_crop_paths,
+        run_yolo_detect,
+        save_crops,
+    )
     from .io import make_run_dir, write_params, write_results
     from .util import get_env_info
 
@@ -370,8 +420,8 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         "img": str(img_path),
         "out_dir": str(args.out_dir),
         "ocr_conf": args.ocr_conf,
-        "filter_words": args.filter_words,
-        "filter_words_file": args.filter_words_file,
+        "allowed_ids": args.allowed_ids,
+        "ocr_char_set": args.ocr_char_set,
         "yolo_weights": args.yolo_weights,
         "yolo_conf": float(args.yolo_conf),
         "yolo_iou": float(args.yolo_iou),
@@ -413,8 +463,6 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         vis_path = vis_dir / f"{img_path.stem}_yolo.jpg"
         render_detections(img_path, dets, vis_path)
 
-    from .infer import save_crops
-
     crops_dir = run_dir / "crops"
     crop_meta = save_crops(
         img_path=img_path,
@@ -423,22 +471,12 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         pad_frac=float(args.pad),
     )
 
-    from .infer import (
-        init_paddle_ocr,
-        load_filter_words,
-        run_ocr_on_crop_paths,
-    )
-
-    filter_words_lc = load_filter_words(args.filter_words, args.filter_words_file)
-
-    # init OCR
     ocr = init_paddle_ocr(ocr_device=args.ocr_device)
 
     ocr_candidates = run_ocr_on_crop_paths(
         ocr=ocr,
         crop_meta=crop_meta if crop_meta is not None else [],
         ocr_conf=float(args.ocr_conf),
-        filter_words_lc=filter_words_lc
     )
 
     if args.delete_crops:
@@ -472,7 +510,10 @@ def _cmd_infer(args: argparse.Namespace) -> int:
             "pad_frac": float(args.pad),
             "deleted_after_ocr": bool(args.delete_crops),
         },
-        "filter_words_used": filter_words_lc,
+        "candidate_filter": {
+            "allowed_ids": args.allowed_ids,
+            "ocr_char_set": args.ocr_char_set,
+        },
         "ocr": {
             "conf": float(args.ocr_conf),
             "device": args.ocr_device,
@@ -483,6 +524,7 @@ def _cmd_infer(args: argparse.Namespace) -> int:
 
     # --- Production JSON output ---
     from .production import infer_to_production_json, make_production_out_path, write_production_json
+
     prod = infer_to_production_json(results)
 
     runs_dir = Path(args.runs_dir)
@@ -507,7 +549,6 @@ def _cmd_album(args: argparse.Namespace) -> int:
     from .config import default_cache_dir, yolo_cache_path
     from .infer import (
         init_paddle_ocr,
-        load_filter_words,
         load_yolo,
         render_detections,
         run_ocr_on_crop_paths,
@@ -534,8 +575,8 @@ def _cmd_album(args: argparse.Namespace) -> int:
         "dir": str(dir_path),
         "out_dir": str(args.out_dir),
         "ocr_conf": float(args.ocr_conf),
-        "filter_words": args.filter_words,
-        "filter_words_file": args.filter_words_file,
+        "allowed_ids": args.allowed_ids,
+        "ocr_char_set": args.ocr_char_set,
         "pad": float(args.pad),
         "yolo_weights": args.yolo_weights,
         "yolo_conf": float(args.yolo_conf),
@@ -563,7 +604,6 @@ def _cmd_album(args: argparse.Namespace) -> int:
     # Init models ONCE
     yolo = load_yolo(weights_path)
     ocr = init_paddle_ocr(ocr_device=args.ocr_device)
-    filter_words_lc = load_filter_words(args.filter_words, args.filter_words_file)
 
     per_image_results = []
     failed_images = []
@@ -607,7 +647,6 @@ def _cmd_album(args: argparse.Namespace) -> int:
                 ocr=ocr,
                 crop_meta=crops_meta,
                 ocr_conf=float(args.ocr_conf),
-                filter_words_lc=filter_words_lc,
             )
 
             if args.delete_crops:
@@ -640,7 +679,10 @@ def _cmd_album(args: argparse.Namespace) -> int:
                     "pad_frac": float(args.pad),
                     "deleted_after_ocr": bool(args.delete_crops),
                 },
-                "filter_words_used": filter_words_lc,
+                "candidate_filter": {
+                    "allowed_ids": args.allowed_ids,
+                    "ocr_char_set": args.ocr_char_set,
+                },
                 "ocr": {
                     "conf": float(args.ocr_conf),
                     "device": args.ocr_device,
@@ -671,7 +713,10 @@ def _cmd_album(args: argparse.Namespace) -> int:
         "num_images_processed": int(len(per_image_results)),
         "num_images_failed": int(len(failed_images)),
         "failed_images": failed_images,
-        "filter_words_used": filter_words_lc,
+        "candidate_filter": {
+            "allowed_ids": args.allowed_ids,
+            "ocr_char_set": args.ocr_char_set,
+        },
         "yolo": {
             "weights": str(weights_path),
             "conf": float(args.yolo_conf),
