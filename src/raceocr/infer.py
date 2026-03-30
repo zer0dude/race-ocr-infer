@@ -29,17 +29,30 @@ def run_yolo_detect(
     iou: float = 0.45,
     imgsz: int = 1280,
     device: Optional[str] = None,
+    classes: Optional[List[int]] = None,
 ) -> List[Detection]:
     """
-    Runs YOLO on a single image, returns normalized detections list.
+    Runs YOLO on a single image and returns a normalized detections list.
+
+    Args:
+        model: Loaded Ultralytics YOLO model.
+        img_path: Input image path.
+        conf: YOLO confidence threshold.
+        iou: YOLO IoU threshold.
+        imgsz: YOLO inference image size.
+        device: Device string such as "cpu", "0", or "cuda:0".
+        classes: Optional list of class IDs to detect. If None, all classes are used.
+
+    Returns:
+        List of Detection objects sorted by confidence descending.
     """
-    # device can be "cpu", "0", "cuda:0" etc; ultralytics accepts str or int
     pred = model.predict(
         source=str(img_path),
         conf=conf,
         iou=iou,
         imgsz=imgsz,
         device=device,
+        classes=classes,
         verbose=False,
     )
     if not pred:
@@ -67,7 +80,7 @@ def run_yolo_detect(
                 xyxy=(float(x1), float(y1), float(x2), float(y2)),
             )
         )
-    # sort high->low confidence
+
     out.sort(key=lambda d: d.conf, reverse=True)
     return out
 

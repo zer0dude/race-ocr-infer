@@ -5,6 +5,67 @@ import sys
 from typing import List, Optional
 
 
+YOLO_CLASS_NAME_TO_ID = {
+    "race_bibs": 0,
+    "hedbands": 1,
+    "bike-labels": 2,
+}
+
+
+def parse_yolo_classes(value: str) -> Optional[List[int]]:
+    """
+    Parse a yolo class selection string into a list of class IDs.
+
+    Supported forms:
+      - "all" -> None
+      - "race_bibs"
+      - "race_bibs,hedbands"
+      - "0"
+      - "0,2"
+
+    Returns:
+        None if all classes should be used, otherwise a sorted list of class IDs.
+
+    Raises:
+        argparse.ArgumentTypeError on invalid class names or IDs.
+    """
+    if value is None:
+        return [0]
+
+    raw = value.strip()
+    if not raw:
+        return [0]
+
+    if raw.lower() == "all":
+        return None
+
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if not parts:
+        return [0]
+
+    class_ids = set()
+    valid_ids = set(YOLO_CLASS_NAME_TO_ID.values())
+
+    for part in parts:
+        if part.isdigit():
+            cls_id = int(part)
+            if cls_id not in valid_ids:
+                raise argparse.ArgumentTypeError(
+                    f"Invalid YOLO class id '{part}'. Valid ids: {sorted(valid_ids)}."
+                )
+            class_ids.add(cls_id)
+            continue
+
+        if part not in YOLO_CLASS_NAME_TO_ID:
+            raise argparse.ArgumentTypeError(
+                f"Invalid YOLO class name '{part}'. "
+                f"Valid names: {sorted(YOLO_CLASS_NAME_TO_ID.keys())}, or 'all'."
+            )
+        class_ids.add(YOLO_CLASS_NAME_TO_ID[part])
+
+    return sorted(class_ids)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="raceocr",
@@ -97,6 +158,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.45,
         help="YOLO IoU threshold (default: 0.45).",
+    )
+    p_infer.add_argument(
+        "--yolo-classes",
+        type=parse_yolo_classes,
+        default=parse_yolo_classes("race_bibs"),
+        help=(
+            "YOLO classes to detect. Default: race_bibs. "
+            "Examples: race_bibs | race_bibs,hedbands | 0,2 | all"
+        ),
     )
     p_infer.add_argument(
         "--imgsz",
@@ -207,6 +277,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="YOLO IoU threshold (default: 0.45).",
     )
     p_album.add_argument(
+        "--yolo-classes",
+        type=parse_yolo_classes,
+        default=parse_yolo_classes("race_bibs"),
+        help=(
+            "YOLO classes to detect. Default: race_bibs. "
+            "Examples: race_bibs | race_bibs,hedbands | 0,2 | all"
+        ),
+    )
+    p_album.add_argument(
         "--imgsz",
         type=int,
         default=1280,
@@ -296,6 +375,7 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         "yolo_weights": args.yolo_weights,
         "yolo_conf": float(args.yolo_conf),
         "yolo_iou": float(args.yolo_iou),
+        "yolo_classes": args.yolo_classes,
         "create_vis": bool(args.create_vis),
         "delete_crops": bool(args.delete_crops),
         "imgsz": int(args.imgsz),
@@ -324,6 +404,7 @@ def _cmd_infer(args: argparse.Namespace) -> int:
         iou=float(args.yolo_iou),
         imgsz=int(args.imgsz),
         device=args.device,
+        classes=args.yolo_classes,
     )
 
     vis_path = None
@@ -378,6 +459,7 @@ def _cmd_infer(args: argparse.Namespace) -> int:
             "weights": str(weights_path),
             "conf": float(args.yolo_conf),
             "iou": float(args.yolo_iou),
+            "classes": args.yolo_classes,
             "imgsz": int(args.imgsz),
             "device": args.device,
             "runs_dir": str(args.runs_dir),
@@ -458,6 +540,7 @@ def _cmd_album(args: argparse.Namespace) -> int:
         "yolo_weights": args.yolo_weights,
         "yolo_conf": float(args.yolo_conf),
         "yolo_iou": float(args.yolo_iou),
+        "yolo_classes": args.yolo_classes,
         "imgsz": int(args.imgsz),
         "create_vis": bool(args.create_vis),
         "delete_crops": bool(args.delete_crops),
@@ -503,6 +586,7 @@ def _cmd_album(args: argparse.Namespace) -> int:
                 iou=float(args.yolo_iou),
                 imgsz=int(args.imgsz),
                 device=args.device,
+                classes=args.yolo_classes,
             )
 
             # optional per-image vis
@@ -545,6 +629,7 @@ def _cmd_album(args: argparse.Namespace) -> int:
                     "weights": str(weights_path),
                     "conf": float(args.yolo_conf),
                     "iou": float(args.yolo_iou),
+                    "classes": args.yolo_classes,
                     "imgsz": int(args.imgsz),
                     "device": args.device,
                 },
@@ -565,7 +650,6 @@ def _cmd_album(args: argparse.Namespace) -> int:
                 "ocr_candidates": ocr_candidates,
             }
 
-            # debug summary (small)
             summary = {
                 "orig_img": str(img_path),
                 "num_detections": len(img_results["detections"]),
@@ -579,7 +663,6 @@ def _cmd_album(args: argparse.Namespace) -> int:
         except Exception as e:
             failed_images.append({"image": str(img_path), "error": repr(e)})
 
-    # Album internal results (for artifacts/debug + production conversion)
     results = {
         "mode": "album",
         "input_folder_path": str(dir_path),
@@ -593,6 +676,7 @@ def _cmd_album(args: argparse.Namespace) -> int:
             "weights": str(weights_path),
             "conf": float(args.yolo_conf),
             "iou": float(args.yolo_iou),
+            "classes": args.yolo_classes,
             "imgsz": int(args.imgsz),
             "device": args.device,
         },
@@ -600,7 +684,6 @@ def _cmd_album(args: argparse.Namespace) -> int:
             "conf": float(args.ocr_conf),
             "device": args.ocr_device,
         },
-        # IMPORTANT: production.py will convert these and strip per-image meta
         "per_image_results": per_image_results,
     }
     write_results(run_dir, results)
