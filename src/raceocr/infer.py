@@ -29,17 +29,30 @@ def run_yolo_detect(
     iou: float = 0.45,
     imgsz: int = 1280,
     device: Optional[str] = None,
+    classes: Optional[List[int]] = None,
 ) -> List[Detection]:
     """
-    Runs YOLO on a single image, returns normalized detections list.
+    Runs YOLO on a single image and returns a normalized detections list.
+
+    Args:
+        model: Loaded Ultralytics YOLO model.
+        img_path: Input image path.
+        conf: YOLO confidence threshold.
+        iou: YOLO IoU threshold.
+        imgsz: YOLO inference image size.
+        device: Device string such as "cpu", "0", or "cuda:0".
+        classes: Optional list of class IDs to detect. If None, all classes are used.
+
+    Returns:
+        List of Detection objects sorted by confidence descending.
     """
-    # device can be "cpu", "0", "cuda:0" etc; ultralytics accepts str or int
     pred = model.predict(
         source=str(img_path),
         conf=conf,
         iou=iou,
         imgsz=imgsz,
         device=device,
+        classes=classes,
         verbose=False,
     )
     if not pred:
@@ -67,7 +80,7 @@ def run_yolo_detect(
                 xyxy=(float(x1), float(y1), float(x2), float(y2)),
             )
         )
-    # sort high->low confidence
+
     out.sort(key=lambda d: d.conf, reverse=True)
     return out
 
@@ -220,44 +233,10 @@ def init_paddle_ocr(ocr_device: str = "cpu"):
     )
 
 
-def load_filter_words(filter_words: str, filter_words_file: str | None) -> List[str]:
-    words: List[str] = []
-    if filter_words:
-        words.extend([w.strip() for w in filter_words.split(",") if w.strip()])
-
-    if filter_words_file:
-        p = Path(filter_words_file)
-        if p.exists():
-            for line in p.read_text(encoding="utf-8").splitlines():
-                s = line.strip()
-                if s and not s.startswith("#"):
-                    words.append(s)
-
-    # normalize to lowercase for matching
-    out = []
-    seen = set()
-    for w in words:
-        wl = w.lower()
-        if wl not in seen:
-            out.append(wl)
-            seen.add(wl)
-    return out
-
-
-def is_filtered(text: str, filter_words_lc: List[str]) -> bool:
-    """
-    Simple rule (lean v0):
-    - case-insensitive substring match against any filter word
-    """
-    tl = text.lower()
-    return any(fw in tl for fw in filter_words_lc)
-
-
 def run_ocr_on_crop_paths(
     ocr,
     crop_meta: List[Dict[str, Any]],
     ocr_conf: float,
-    filter_words_lc: List[str],
 ) -> List[Dict[str, Any]]:
     """
     Runs OCR on each crop image path listed in crop_meta.
@@ -277,18 +256,14 @@ def run_ocr_on_crop_paths(
             cm["ocr"] = []
             continue
 
-        # PaddleOCR API variants exist; handle the common ones
         try:
             ocr_out = ocr.ocr(crop_path)
         except TypeError:
-            # some versions expect cls=False
             ocr_out = ocr.ocr(crop_path, cls=False)
 
         per_crop: List[Dict[str, Any]] = []
 
         # --- Case 1: PaddleOCR v3 / PaddleX pipeline dict output ---
-        # Example:
-        #   [{'rec_texts': [...], 'rec_scores': [...], 'rec_polys': [...], ...}]
         if isinstance(ocr_out, list) and len(ocr_out) == 1 and isinstance(ocr_out[0], dict):
             d0 = ocr_out[0]
             texts = d0.get("rec_texts") or []
@@ -306,8 +281,6 @@ def run_ocr_on_crop_paths(
                     continue
                 if not text_str:
                     continue
-                if is_filtered(text_str, filter_words_lc):
-                    continue
 
                 rec = {
                     "text": text_str,
@@ -323,14 +296,10 @@ def run_ocr_on_crop_paths(
 
         # --- Case 2: Classic PaddleOCR list output ---
         else:
-            # Normalize to list-of-lines
             lines = []
             if ocr_out is None:
                 lines = []
             elif isinstance(ocr_out, list):
-                # Common formats:
-                # 1) [ [ [box, (text, conf)], ... ] ]
-                # 2) [ [box, (text, conf)], ... ]
                 if len(ocr_out) == 0:
                     lines = []
                 elif isinstance(ocr_out[0], list) and len(ocr_out) == 1 and (
@@ -343,7 +312,6 @@ def run_ocr_on_crop_paths(
                 lines = []
 
             for item in lines:
-                # Expect: [box, (text, conf)] or (box, (text, conf))
                 try:
                     box = item[0]
                     text, conf = item[1]
@@ -360,8 +328,6 @@ def run_ocr_on_crop_paths(
                     continue
                 if not text_str:
                     continue
-                if is_filtered(text_str, filter_words_lc):
-                    continue
 
                 rec = {
                     "text": text_str,
@@ -375,10 +341,8 @@ def run_ocr_on_crop_paths(
                 per_crop.append(rec)
                 candidates.append(rec)
 
-        # rank within crop
         per_crop.sort(key=lambda r: r["conf"], reverse=True)
         cm["ocr"] = per_crop
 
-    # global rank
     candidates.sort(key=lambda r: r["conf"], reverse=True)
     return candidates
