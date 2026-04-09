@@ -159,11 +159,18 @@ For every bib detected in every image of a group, a vote weight is computed as:
 weight = yolo_confidence × ocr_confidence × spatial_affinity
 ```
 
-`spatial_affinity` rewards bibs that are:
-- **horizontally aligned** with the target face (gaussian falloff — bib directly below the face scores highest, a companion's offset bib scores lower)
-- **vertically below** the face (×1.2 bonus if bib top is below the face top, ×0.6 penalty if above)
+`spatial_affinity` first applies two hard **plausibility gates** — bibs that fail either are fully discarded (weight = 0):
 
-Votes accumulate per OCR string across all images. The string with the highest total weight is the `best_guess`. Groups are flagged `needs_review: true` when confidence is below 0.5 or when the top two candidates are within 15% of each other's weight (both thresholds are configurable).
+1. **Vertical gate:** if the bib's bottom edge is above the face's top edge, discard. A person's own bib is always below their head; a bib above the face top belongs to a different person in the background.
+2. **Horizontal gate:** if the nearest edge of the bib is more than `max_bib_dist_factor × bib_width` (default 1.0×) from the face center, discard. Uses bib width as the reference unit so the threshold scales naturally with camera distance.
+
+Bibs that pass both gates are then scored:
+- **Horizontal alignment**: gaussian falloff from the face center (sigma = face_width × 1.0 by default) — bib directly below the face scores highest
+- **Vertical position**: ×1.2 multiplier if bib top is below the face top, ×0.6 if overlapping
+
+If no bib in any image passes the plausibility gates, the group returns `best_guess: null` — this correctly handles bystanders (who have no bib) and athletes whose bib was never in a plausible position.
+
+Votes accumulate per OCR string across all images. The string with the highest total weight is the `best_guess`. Each group is assigned a `status` string (see output schema below) based on confidence, ambiguity, and cross-group duplicate detection.
 
 Minimal example:
 
@@ -201,34 +208,52 @@ Noise entries are skipped — they are faces the clustering model could not conf
     "group_79": {
       "best_guess": "423",
       "confidence": 0.9572,
-      "needs_review": false,
+      "status": "confident",
+      "source_images": ["FAJ_3204.jpg", "FLS01658.jpg", "FAJ_3211.jpg"],
       "vote_breakdown": { "423": 11.58, "367": 0.52 },
       "num_images": 14,
       "num_images_with_bibs": 13,
+      "num_plausible_bib_detections": 22,
       "face_entries": ["FAJ_3204_0", "FLS01658_0", "..."]
     },
     "group_122": {
       "best_guess": "389",
       "confidence": 0.5019,
-      "needs_review": true,
+      "status": "multiple_plausible_bib_ids",
+      "source_images": ["LUM-167.jpg", "LUPT2759.jpg"],
       "vote_breakdown": { "389": 1.08, "89": 1.07 },
       "num_images": 2,
       "num_images_with_bibs": 2,
+      "num_plausible_bib_detections": 4,
       "face_entries": ["LUM-167_3", "LUPT2759_1"]
+    },
+    "group_X": {
+      "best_guess": "423",
+      "confidence": 0.91,
+      "status": "cross_group_duplicate",
+      "source_images": ["FAJ_3300.jpg"],
+      "vote_breakdown": { "423": 8.14 },
+      "num_images": 5,
+      "num_images_with_bibs": 4,
+      "num_plausible_bib_detections": 7,
+      "face_entries": ["FAJ_3300_1", "..."]
     },
     "group_33": {
       "best_guess": null,
       "confidence": 0.0,
-      "needs_review": true,
+      "status": "insufficient_plausible_bibs",
+      "source_images": ["DSC_9084.jpg"],
       "vote_breakdown": {},
       "num_images": 3,
       "num_images_with_bibs": 0,
+      "num_plausible_bib_detections": 0,
       "face_entries": ["DSC_9084_0", "..."]
     }
   },
   "meta": {
     "approach": "spatial_weighted",
-    "spatial_sigma": 1.5,
+    "spatial_sigma": 1.0,
+    "max_bib_dist_factor": 1.0,
     "flag_threshold": 0.5,
     "ambiguity_margin": 0.15,
     "yolo_conf": 0.86,
@@ -236,38 +261,52 @@ Noise entries are skipped — they are faces the clustering model could not conf
     "min_box_area": 10000.0,
     "ocr_char_set": "numeric",
     "num_groups_total": 157,
-    "num_groups_needs_review": 49
+    "num_confident": 65,
+    "num_multiple_plausible_bib_ids": 30,
+    "num_cross_group_duplicate": 14,
+    "num_insufficient_plausible_bibs": 48
   }
 }
 ```
 
+**Status values:**
+
+| status | meaning | `best_guess` |
+|---|---|---|
+| `confident` | clear winner, not shared with another group | non-null |
+| `multiple_plausible_bib_ids` | ambiguous — top candidates too close in weight | non-null |
+| `cross_group_duplicate` | this bib was also attributed to another group | non-null |
+| `insufficient_plausible_bibs` | fewer than 2 plausible bib detections in all images | null |
+
 Notes:
-- `best_guess` is `null` when no bib was detected in any image of the group.
-- `needs_review: true` is always set when `best_guess` is `null`.
+- `source_images` is an ordered, deduplicated list of original image filenames that contributed detections for this group — useful for production processing without re-joining entry IDs to filenames.
+- `num_plausible_bib_detections` counts bib detections that passed both hard plausibility gates (affinity > 0). Groups with fewer than 2 receive `insufficient_plausible_bibs`.
 - `vote_breakdown` lists all candidate strings that received any votes, sorted by total weight descending.
-- Groups with `needs_review: false` are confident attributions safe for automation.
-- Groups with `needs_review: true` and a non-null `best_guess` still have a most-likely answer but warrant human review.
+- Cross-group duplicate detection runs as a post-processing pass: if two or more groups share the same `best_guess`, all are overwritten to `cross_group_duplicate` regardless of prior status.
 
 #### Review symlink tool
 
-`scripts/make_review_links.py` takes the `face-groups` output JSON and creates a symlink folder tree for visual review:
+`tests/make_review_links.py` takes the `face-groups` output JSON and creates a symlink folder tree for visual review. Groups are routed into buckets by `status`, with the bib number as a sub-folder to quickly spot conflicts:
 
 ```
 review_links/
-  confident/                 one folder per confident group
-    group_79__bib_423/       folder name encodes the best guess
-      FAJ_3204.jpg -> ...    symlinks to original images
-      FLS01658.jpg -> ...
-  review/                    groups flagged needs_review=true with a guess
-    group_122__bib_389/
-  no_bib/                    groups where no bib was ever detected
-    group_33/
-  noise/                     flat folder of all noise-entry original images
-    FAJ_1000.jpg -> ...
+  confident/
+    <bib>/
+      <group_id>/            symlinks to original images + face crops
+  review/
+    multiple_plausible_bib_ids/
+      <bib>/
+        <group_id>/          ambiguous groups — top candidates too close
+    cross_group_duplicate/
+      <bib>/
+        <group_id>/          groups whose best_guess is shared with another group
+  no_bib/
+    <group_id>/              insufficient_plausible_bibs groups
+  noise/                     flat folder of noise-entry face crops and image symlinks
 ```
 
 ```bash
-python scripts/make_review_links.py \
+python tests/make_review_links.py \
   --result       path/to/face_groups_result.json \
   --groups       path/to/refined_groups.json \
   --embeddings-dir path/to/embeddings \
@@ -466,9 +505,10 @@ Required:
 - `--out PATH` output JSON path
 
 Attribution tuning:
-- `--spatial-sigma FLOAT` gaussian sigma for horizontal alignment as a multiple of face width (default: `1.5`); lower = tighter discrimination against companion runners
-- `--flag-threshold FLOAT` confidence below which `needs_review` is set (default: `0.5`)
-- `--ambiguity-margin FLOAT` if runner-up weight ÷ top weight exceeds `1 - margin`, flag as ambiguous (default: `0.15`)
+- `--spatial-sigma FLOAT` gaussian sigma for horizontal alignment as a multiple of face width (default: `1.0`); applies only to bibs that pass the hard plausibility gates
+- `--max-bib-dist FLOAT` hard horizontal cutoff in bib-widths from face center (default: `1.0`); bibs whose nearest edge exceeds this are discarded entirely
+- `--flag-threshold FLOAT` confidence below which a group receives `status=multiple_plausible_bib_ids` (default: `0.5`)
+- `--ambiguity-margin FLOAT` if runner-up weight ÷ top weight exceeds `1 - margin`, group receives `status=multiple_plausible_bib_ids` (default: `0.15`)
 
 Main OCR / YOLO options (same defaults as `infer` / `album`):
 - `--ocr-conf FLOAT` (default: `0.95`)

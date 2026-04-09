@@ -467,17 +467,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_fg.add_argument(
         "--spatial-sigma",
         type=float,
-        default=1.5,
+        default=1.0,
         help=(
             "Gaussian sigma for horizontal bib-to-face alignment, "
-            "as a multiple of face width (default: 1.5)."
+            "as a multiple of face width (default: 1.0). "
+            "Only applies to bibs that pass the hard plausibility gates."
+        ),
+    )
+    p_fg.add_argument(
+        "--max-bib-dist",
+        type=float,
+        default=1.0,
+        help=(
+            "Hard plausibility cutoff: nearest bib edge must be within "
+            "this many bib-widths of the face center (default: 1.0). "
+            "Bibs beyond this threshold are fully discarded (weight=0)."
         ),
     )
     p_fg.add_argument(
         "--flag-threshold",
         type=float,
         default=0.5,
-        help="Confidence below which a group is flagged needs_review=True (default: 0.5).",
+        help="Confidence below which a group receives status=multiple_plausible_bib_ids (default: 0.5).",
     )
     p_fg.add_argument(
         "--ambiguity-margin",
@@ -485,7 +496,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.15,
         help=(
             "If the second-best candidate's weight is within this fraction of the best, "
-            "flag the group needs_review=True (default: 0.15)."
+            "the group receives status=multiple_plausible_bib_ids (default: 0.15)."
         ),
     )
     p_fg.add_argument(
@@ -970,6 +981,7 @@ def _cmd_face_groups(args: argparse.Namespace) -> int:
         "min_box_area": float(args.min_box_area),
         "allowed_ids": args.allowed_ids,
         "spatial_sigma": float(args.spatial_sigma),
+        "max_bib_dist_factor": float(args.max_bib_dist),
         "flag_threshold": float(args.flag_threshold),
         "ambiguity_margin": float(args.ambiguity_margin),
         "pad": float(args.pad),

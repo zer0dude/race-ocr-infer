@@ -37,22 +37,36 @@ def build_image_index(images_dir: Path) -> Dict[str, Path]:
 def spatial_affinity(
     face_bbox: List[float],
     bib_xyxy: List[float],
-    sigma: float = 1.5,
+    sigma: float = 1.0,
+    max_bib_dist_factor: float = 1.0,
 ) -> float:
     """
     Compute spatial affinity between a face bounding box and a bib bounding box.
 
-    Rewards bibs that are horizontally aligned with the face (gaussian falloff)
-    and vertically positioned below the face top (runner's own bib is below their face).
+    Two hard plausibility gates are applied before scoring. A bib that fails
+    either gate is fully discarded (returns 0.0):
 
-    face_bbox: [x1, y1, x2, y2]
-    bib_xyxy:  [bx1, by1, bx2, by2]
-    sigma:     gaussian sigma as a multiple of face_width (default 1.5)
+      Gate 1 — vertical: bib bottom above face top (bib_y2 < face_y1) is
+        physically impossible for the target runner's own bib.
 
-    Returns a value in (0, ~1.2].
+      Gate 2 — horizontal: nearest bib edge more than
+        max_bib_dist_factor × bib_width from the face center is too far
+        away to plausibly belong to this runner.
+
+    Bibs that pass both gates are scored with a gaussian horizontal
+    alignment (tighter sigma = stronger preference for bib directly below
+    the face) and a vertical multiplier (1.2 if below face top, 0.6 if
+    overlapping or above).
+
+    face_bbox:           [x1, y1, x2, y2]
+    bib_xyxy:            [bx1, by1, bx2, by2]
+    sigma:               gaussian sigma as a multiple of face_width (default 1.0)
+    max_bib_dist_factor: hard horizontal cutoff in bib-widths (default 1.5)
+
+    Returns a value in [0, ~1.2].
     """
     fx1, fy1, fx2, _ = face_bbox
-    bx1, by1, bx2, _ = bib_xyxy
+    bx1, by1, bx2, by2 = bib_xyxy
 
     face_cx = (fx1 + fx2) / 2.0
     face_width = fx2 - fx1
@@ -60,13 +74,24 @@ def spatial_affinity(
     if face_width <= 0:
         return 0.0
 
+    # Gate 1: bib entirely above the face — physically impossible for target runner
+    if by2 < fy1:
+        return 0.0
+
+    # Gate 2: nearest bib edge too far horizontally — not plausibly this runner's bib
+    bib_width = bx2 - bx1
+    if bib_width > 0:
+        edge_dist = max(0.0, bx1 - face_cx, face_cx - bx2)
+        if edge_dist > max_bib_dist_factor * bib_width:
+            return 0.0
+
     bib_cx = (bx1 + bx2) / 2.0
 
     # Gaussian horizontal alignment
     sigma_px = face_width * sigma
     horiz = math.exp(-0.5 * ((bib_cx - face_cx) / sigma_px) ** 2)
 
-    # Vertical bonus: bib starting below face top → likely the runner's own bib
+    # Vertical multiplier: bib starting below face top → likely the runner's own bib
     vert = 1.2 if by1 > fy1 else 0.6
 
     return horiz * vert
@@ -100,7 +125,8 @@ def attribute_group(
     allowed_ids = params.get("allowed_ids")
     ocr_char_set = params.get("ocr_char_set", "numeric")
     min_box_area = float(params.get("min_box_area", 10000.0))
-    sigma = float(params.get("spatial_sigma", 1.5))
+    sigma = float(params.get("spatial_sigma", 1.0))
+    max_bib_dist_factor = float(params.get("max_bib_dist_factor", 1.0))
     flag_threshold = float(params.get("flag_threshold", 0.5))
     ambiguity_margin = float(params.get("ambiguity_margin", 0.15))
     crops_base_dir: Optional[Path] = params.get("crops_base_dir")
@@ -108,6 +134,9 @@ def attribute_group(
     # Accumulate weighted votes: text -> total_weight
     vote_totals: Dict[str, float] = {}
     num_images_with_bibs = 0
+    num_plausible_bib_detections = 0
+    source_images: List[str] = []
+    seen_source_images: set = set()
 
     for entry_id in entries:
         # Load face metadata
@@ -124,6 +153,10 @@ def attribute_group(
         img_path = image_index.get(orig_filename)
         if img_path is None or not img_path.exists():
             continue
+
+        if orig_filename not in seen_source_images:
+            source_images.append(orig_filename)
+            seen_source_images.add(orig_filename)
 
         # Run YOLO + OCR
         try:
@@ -196,7 +229,13 @@ def attribute_group(
                 if len(bib_xyxy) != 4:
                     continue
 
-                affinity = spatial_affinity(face_bbox, bib_xyxy, sigma=sigma)
+                affinity = spatial_affinity(
+                    face_bbox, bib_xyxy,
+                    sigma=sigma,
+                    max_bib_dist_factor=max_bib_dist_factor,
+                )
+                if affinity > 0:
+                    num_plausible_bib_detections += 1
                 weight = box_conf * ocr_conf_val * affinity
 
                 vote_totals[text] = vote_totals.get(text, 0.0) + weight
@@ -205,14 +244,16 @@ def attribute_group(
             continue
 
     # Aggregate
-    if not vote_totals:
+    if not vote_totals or num_plausible_bib_detections < 2:
         return {
             "best_guess": None,
             "confidence": 0.0,
-            "needs_review": True,
+            "status": "insufficient_plausible_bibs",
             "vote_breakdown": {},
+            "source_images": source_images,
             "num_images": len(entries),
             "num_images_with_bibs": num_images_with_bibs,
+            "num_plausible_bib_detections": num_plausible_bib_detections,
             "face_entries": entries,
         }
 
@@ -229,15 +270,17 @@ def attribute_group(
         if best_weight > 0 and second_weight / best_weight > (1.0 - ambiguity_margin):
             ambiguous = True
 
-    needs_review = confidence < flag_threshold or ambiguous
+    status = "multiple_plausible_bib_ids" if (confidence < flag_threshold or ambiguous) else "confident"
 
     return {
         "best_guess": best_text,
         "confidence": round(confidence, 4),
-        "needs_review": needs_review,
+        "status": status,
         "vote_breakdown": {k: round(v, 4) for k, v in sorted_candidates},
+        "source_images": source_images,
         "num_images": len(entries),
         "num_images_with_bibs": num_images_with_bibs,
+        "num_plausible_bib_detections": num_plausible_bib_detections,
         "face_entries": entries,
     }
 
@@ -277,7 +320,6 @@ def run_face_groups(
     ocr = init_paddle_ocr(ocr_device=params.get("ocr_device", "cpu"))
 
     groups_out: Dict[str, Any] = {}
-    num_needs_review = 0
 
     for i, (group_id, entries) in enumerate(groups.items(), start=1):
         print(f"[face-groups] {i}/{num_groups} {group_id} ({len(entries)} entries)...")
@@ -290,8 +332,22 @@ def run_face_groups(
             params=params,
         )
         groups_out[group_id] = result
-        if result.get("needs_review"):
-            num_needs_review += 1
+
+    # Cross-group duplicate detection: flag groups sharing the same best_guess
+    from collections import Counter
+    guess_counts = Counter(
+        info["best_guess"] for info in groups_out.values()
+        if info["best_guess"] is not None
+    )
+    duplicate_guesses = {g for g, count in guess_counts.items() if count > 1}
+    for info in groups_out.values():
+        if info["best_guess"] in duplicate_guesses:
+            info["status"] = "cross_group_duplicate"
+
+    num_confident = sum(1 for g in groups_out.values() if g["status"] == "confident")
+    num_multiple = sum(1 for g in groups_out.values() if g["status"] == "multiple_plausible_bib_ids")
+    num_duplicate = sum(1 for g in groups_out.values() if g["status"] == "cross_group_duplicate")
+    num_insufficient = sum(1 for g in groups_out.values() if g["status"] == "insufficient_plausible_bibs")
 
     finished_at = datetime.now(timezone.utc)
     if started_at is None:
@@ -300,7 +356,8 @@ def run_face_groups(
 
     meta_out = {
         "approach": "spatial_weighted",
-        "spatial_sigma": float(params.get("spatial_sigma", 1.5)),
+        "spatial_sigma": float(params.get("spatial_sigma", 1.0)),
+        "max_bib_dist_factor": float(params.get("max_bib_dist_factor", 1.0)),
         "flag_threshold": float(params.get("flag_threshold", 0.5)),
         "ambiguity_margin": float(params.get("ambiguity_margin", 0.15)),
         "yolo_conf": float(params.get("yolo_conf", 0.86)),
@@ -308,7 +365,10 @@ def run_face_groups(
         "min_box_area": float(params.get("min_box_area", 10000.0)),
         "ocr_char_set": params.get("ocr_char_set", "numeric"),
         "num_groups_total": num_groups,
-        "num_groups_needs_review": num_needs_review,
+        "num_confident": num_confident,
+        "num_multiple_plausible_bib_ids": num_multiple,
+        "num_cross_group_duplicate": num_duplicate,
+        "num_insufficient_plausible_bibs": num_insufficient,
         "groups_json": str(groups_path),
         "embeddings_dir": str(embeddings_dir),
         "images_dir": str(images_dir),
@@ -325,6 +385,6 @@ def run_face_groups(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_json(out_path, output)
     print(f"[face-groups] wrote results to {out_path}")
-    print(f"[face-groups] {num_needs_review}/{num_groups} groups flagged for review")
+    print(f"[face-groups] confident: {num_confident}, multiple_plausible_bib_ids: {num_multiple}, cross_group_duplicate: {num_duplicate}, insufficient_plausible_bibs: {num_insufficient}")
 
     return output
