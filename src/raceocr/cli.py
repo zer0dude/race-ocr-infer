@@ -367,6 +367,143 @@ def build_parser() -> argparse.ArgumentParser:
         help='Optional output JSON name (e.g. "album_400.json"). Default uses album_<folder>_<timestamp>.json',
     )
 
+    # ---- face-groups ----
+    p_fg = subparsers.add_parser(
+        "face-groups",
+        help="Attribute bib numbers to face groups using spatially-weighted OCR voting.",
+    )
+    p_fg.add_argument(
+        "--groups",
+        required=True,
+        help="Path to refined_groups.json produced by the face clustering step.",
+    )
+    p_fg.add_argument(
+        "--embeddings-dir",
+        required=True,
+        help="Path to the embeddings folder containing <entry>_meta.json files.",
+    )
+    p_fg.add_argument(
+        "--images-dir",
+        required=True,
+        help="Path to folder (searched recursively) containing the original images.",
+    )
+    p_fg.add_argument(
+        "--out",
+        required=True,
+        help="Output path for the results JSON.",
+    )
+    p_fg.add_argument(
+        "--yolo-weights",
+        default=None,
+        help="Path to YOLO weights. Default: cached weights from `raceocr setup`.",
+    )
+    p_fg.add_argument(
+        "--yolo-conf",
+        type=float,
+        default=0.86,
+        help="YOLO confidence threshold (default: 0.86).",
+    )
+    p_fg.add_argument(
+        "--yolo-iou",
+        type=float,
+        default=0.45,
+        help="YOLO IoU threshold (default: 0.45).",
+    )
+    p_fg.add_argument(
+        "--yolo-classes",
+        type=parse_yolo_classes,
+        default=parse_yolo_classes("race_bibs"),
+        help=(
+            "YOLO classes to detect. Default: race_bibs. "
+            "Examples: race_bibs | race_bibs,hedbands | 0,2 | all"
+        ),
+    )
+    p_fg.add_argument(
+        "--imgsz",
+        type=int,
+        default=1280,
+        help="YOLO inference image size (default: 1280).",
+    )
+    p_fg.add_argument(
+        "--device",
+        default=None,
+        help='Device for YOLO (e.g. "cpu", "0", "cuda:0"). Default: Ultralytics auto.',
+    )
+    p_fg.add_argument(
+        "--ocr-device",
+        default="cpu",
+        choices=["gpu", "cpu"],
+        help='Device for PaddleOCR (default: "cpu").',
+    )
+    p_fg.add_argument(
+        "--ocr-conf",
+        type=float,
+        default=0.95,
+        help="Minimum OCR confidence to keep (default: 0.95).",
+    )
+    p_fg.add_argument(
+        "--ocr-char-set",
+        default="numeric",
+        choices=["numeric", "alnum", "any"],
+        help=(
+            "Allowed OCR character set. "
+            "numeric = digits only, alnum = letters+digits only, any = any non-empty text. "
+            "Default: numeric."
+        ),
+    )
+    p_fg.add_argument(
+        "--min-box-area",
+        type=float,
+        default=10000.0,
+        help="Minimum YOLO bounding box area in px^2 to keep (default: 10000).",
+    )
+    p_fg.add_argument(
+        "--allowed-ids",
+        type=parse_allowed_ids,
+        default=None,
+        help="Optional comma-separated whitelist of valid OCR results, e.g. 123,456,789",
+    )
+    p_fg.add_argument(
+        "--spatial-sigma",
+        type=float,
+        default=1.5,
+        help=(
+            "Gaussian sigma for horizontal bib-to-face alignment, "
+            "as a multiple of face width (default: 1.5)."
+        ),
+    )
+    p_fg.add_argument(
+        "--flag-threshold",
+        type=float,
+        default=0.5,
+        help="Confidence below which a group is flagged needs_review=True (default: 0.5).",
+    )
+    p_fg.add_argument(
+        "--ambiguity-margin",
+        type=float,
+        default=0.15,
+        help=(
+            "If the second-best candidate's weight is within this fraction of the best, "
+            "flag the group needs_review=True (default: 0.15)."
+        ),
+    )
+    p_fg.add_argument(
+        "--pad",
+        type=float,
+        default=0.01,
+        help="Crop padding as fraction of box size (default: 0.01).",
+    )
+    p_fg.add_argument(
+        "--delete-crops",
+        action="store_true",
+        help="Delete crop image files after OCR to save disk space (default: off).",
+    )
+    p_fg.add_argument(
+        "--out-dir",
+        default="artifacts",
+        help="Directory to store run artifacts (default: ./artifacts).",
+    )
+
     return parser
 
 
@@ -772,6 +909,64 @@ def _cmd_album(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_face_groups(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .face_groups import run_face_groups
+    from .io import make_run_dir, write_params
+    from .util import get_env_info
+
+    groups_path = Path(args.groups)
+    embeddings_dir = Path(args.embeddings_dir)
+    images_dir = Path(args.images_dir)
+    out_path = Path(args.out)
+
+    for label, p in [("--groups", groups_path), ("--embeddings-dir", embeddings_dir), ("--images-dir", images_dir)]:
+        if not p.exists():
+            raise SystemExit(f"{label} path does not exist: {p}")
+
+    run_dir = make_run_dir("face-groups", groups_path.stem, args.out_dir)
+
+    params = {
+        "command": "face-groups",
+        "groups": str(groups_path),
+        "embeddings_dir": str(embeddings_dir),
+        "images_dir": str(images_dir),
+        "out": str(out_path),
+        "yolo_weights": args.yolo_weights,
+        "yolo_conf": float(args.yolo_conf),
+        "yolo_iou": float(args.yolo_iou),
+        "yolo_classes": args.yolo_classes,
+        "imgsz": int(args.imgsz),
+        "device": args.device,
+        "ocr_device": args.ocr_device,
+        "ocr_conf": float(args.ocr_conf),
+        "ocr_char_set": args.ocr_char_set,
+        "min_box_area": float(args.min_box_area),
+        "allowed_ids": args.allowed_ids,
+        "spatial_sigma": float(args.spatial_sigma),
+        "flag_threshold": float(args.flag_threshold),
+        "ambiguity_margin": float(args.ambiguity_margin),
+        "pad": float(args.pad),
+        "delete_crops": bool(args.delete_crops),
+        "crops_base_dir": run_dir / "crops",
+        "env": get_env_info(),
+        "artifact_dir": str(run_dir),
+    }
+    write_params(run_dir, params)
+
+    run_face_groups(
+        groups_path=groups_path,
+        embeddings_dir=embeddings_dir,
+        images_dir=images_dir,
+        out_path=out_path,
+        params=params,
+    )
+
+    print(f"[face-groups] wrote artifacts to: {run_dir}")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -782,6 +977,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return _cmd_infer(args)
     if args.command == "album":
         return _cmd_album(args)
+    if args.command == "face-groups":
+        return _cmd_face_groups(args)
 
     parser.error(f"Unknown command: {args.command}")
     return 2

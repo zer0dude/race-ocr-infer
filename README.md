@@ -8,6 +8,8 @@ Developed for **zosportu.sk** by **Brian Zelun Jin** (GitHub: **zer0dude**).
 
 The tool is designed to run on a machine with GPU and CUDA, produce a **compact production JSON** for automation, and generate **debug artifacts** for traceability.
 
+It is part of a larger pipeline. The `face-groups` command bridges the output of an upstream **face clustering step** (which groups event photos by the faces that appear in them) with the bib OCR pipeline, attributing a bib number to each face group using spatially-weighted voting.
+
 ---
 
 ## What you get
@@ -144,6 +146,133 @@ Create YOLO visualization per image and delete crops after OCR:
 
 ```bash
 raceocr album --dir path/to/album_folder --create-vis --delete-crops
+```
+
+### `face-groups` — attribute bib numbers to face groups
+
+`face-groups` is designed for integration with an upstream **face clustering** step. It takes as input a set of face groups (images grouped by the face that appears in them, with bounding boxes per detected face) and runs bib OCR on each image. For each face group it produces a **best-guess bib number** with a confidence score, using **spatially-weighted voting** to distinguish the target runner's own bib from those of companion runners.
+
+**How attribution works:**  
+For every bib detected in every image of a group, a vote weight is computed as:
+
+```
+weight = yolo_confidence × ocr_confidence × spatial_affinity
+```
+
+`spatial_affinity` rewards bibs that are:
+- **horizontally aligned** with the target face (gaussian falloff — bib directly below the face scores highest, a companion's offset bib scores lower)
+- **vertically below** the face (×1.2 bonus if bib top is below the face top, ×0.6 penalty if above)
+
+Votes accumulate per OCR string across all images. The string with the highest total weight is the `best_guess`. Groups are flagged `needs_review: true` when confidence is below 0.5 or when the top two candidates are within 15% of each other's weight (both thresholds are configurable).
+
+Minimal example:
+
+```bash
+raceocr face-groups \
+  --groups  path/to/refined_groups.json \
+  --embeddings-dir path/to/embeddings \
+  --images-dir path/to/original/images \
+  --out path/to/output.json
+```
+
+#### Input: `refined_groups.json`
+
+Produced by the upstream face clustering step. Groups images by face identity.
+
+```json
+{
+  "groups": {
+    "group_0": ["FAJ_3204_0", "FAJ_3211_1"],
+    "group_1": ["DSC_9084_2"]
+  },
+  "noise": ["FAJ_1000_0"]
+}
+```
+
+Each entry `"<image_id>_<face_index>"` corresponds to a `<entry>_meta.json` file in the embeddings folder that records `original_filename` and `bbox` (face bounding box in the original image).
+
+Noise entries are skipped — they are faces the clustering model could not confidently assign to any group.
+
+#### Output schema: `face-groups`
+
+```json
+{
+  "groups": {
+    "group_79": {
+      "best_guess": "423",
+      "confidence": 0.9572,
+      "needs_review": false,
+      "vote_breakdown": { "423": 11.58, "367": 0.52 },
+      "num_images": 14,
+      "num_images_with_bibs": 13,
+      "face_entries": ["FAJ_3204_0", "FLS01658_0", "..."]
+    },
+    "group_122": {
+      "best_guess": "389",
+      "confidence": 0.5019,
+      "needs_review": true,
+      "vote_breakdown": { "389": 1.08, "89": 1.07 },
+      "num_images": 2,
+      "num_images_with_bibs": 2,
+      "face_entries": ["LUM-167_3", "LUPT2759_1"]
+    },
+    "group_33": {
+      "best_guess": null,
+      "confidence": 0.0,
+      "needs_review": true,
+      "vote_breakdown": {},
+      "num_images": 3,
+      "num_images_with_bibs": 0,
+      "face_entries": ["DSC_9084_0", "..."]
+    }
+  },
+  "meta": {
+    "approach": "spatial_weighted",
+    "spatial_sigma": 1.5,
+    "flag_threshold": 0.5,
+    "ambiguity_margin": 0.15,
+    "yolo_conf": 0.86,
+    "ocr_conf": 0.95,
+    "min_box_area": 10000.0,
+    "ocr_char_set": "numeric",
+    "num_groups_total": 157,
+    "num_groups_needs_review": 49
+  }
+}
+```
+
+Notes:
+- `best_guess` is `null` when no bib was detected in any image of the group.
+- `needs_review: true` is always set when `best_guess` is `null`.
+- `vote_breakdown` lists all candidate strings that received any votes, sorted by total weight descending.
+- Groups with `needs_review: false` are confident attributions safe for automation.
+- Groups with `needs_review: true` and a non-null `best_guess` still have a most-likely answer but warrant human review.
+
+#### Review symlink tool
+
+`scripts/make_review_links.py` takes the `face-groups` output JSON and creates a symlink folder tree for visual review:
+
+```
+review_links/
+  confident/                 one folder per confident group
+    group_79__bib_423/       folder name encodes the best guess
+      FAJ_3204.jpg -> ...    symlinks to original images
+      FLS01658.jpg -> ...
+  review/                    groups flagged needs_review=true with a guess
+    group_122__bib_389/
+  no_bib/                    groups where no bib was ever detected
+    group_33/
+  noise/                     flat folder of all noise-entry original images
+    FAJ_1000.jpg -> ...
+```
+
+```bash
+python scripts/make_review_links.py \
+  --result       path/to/face_groups_result.json \
+  --groups       path/to/refined_groups.json \
+  --embeddings-dir path/to/embeddings \
+  --images-dir   path/to/original/images \
+  --out          path/to/review_links
 ```
 
 ---
@@ -328,6 +457,37 @@ Artifacts / production output:
 - `--runs-dir PATH` production JSON directory (default: `./runs`)
 - `--output-name NAME.json` set production JSON filename (optional)
 
+### `raceocr face-groups`
+
+Required:
+- `--groups PATH` refined_groups.json from the upstream face clustering step
+- `--embeddings-dir PATH` folder containing `<entry>_meta.json` files
+- `--images-dir PATH` folder containing original images (searched recursively)
+- `--out PATH` output JSON path
+
+Attribution tuning:
+- `--spatial-sigma FLOAT` gaussian sigma for horizontal alignment as a multiple of face width (default: `1.5`); lower = tighter discrimination against companion runners
+- `--flag-threshold FLOAT` confidence below which `needs_review` is set (default: `0.5`)
+- `--ambiguity-margin FLOAT` if runner-up weight ÷ top weight exceeds `1 - margin`, flag as ambiguous (default: `0.15`)
+
+Main OCR / YOLO options (same defaults as `infer` / `album`):
+- `--ocr-conf FLOAT` (default: `0.95`)
+- `--ocr-char-set {numeric,alnum,any}` (default: `numeric`)
+- `--min-box-area FLOAT` (default: `10000`)
+- `--allowed-ids "a,b,c"` optional whitelist
+- `--ocr-device {cpu,gpu}` (default: `cpu`)
+- `--yolo-conf FLOAT` (default: `0.86`)
+- `--yolo-iou FLOAT` (default: `0.45`)
+- `--yolo-classes ...` (default: `race_bibs`)
+- `--imgsz INT` (default: `1280`)
+- `--device STR` YOLO device (default: Ultralytics auto)
+- `--yolo-weights PATH` (default: cached weights)
+- `--pad FLOAT` (default: `0.01`)
+- `--delete-crops` delete crops after OCR (default: off)
+
+Artifacts:
+- `--out-dir PATH` artifacts directory (default: `./artifacts`)
+
 ---
 
 ## Project structure and responsibilities
@@ -338,9 +498,10 @@ The tool is intentionally split by responsibility so that OCR extraction, orches
 - `infer.py` contains the single-image pipeline building blocks: YOLO loading and inference, rendering, crop creation, PaddleOCR initialization, and raw OCR candidate extraction.
 - `album.py` is intentionally small and focused. It provides album-level helpers such as listing input images for folder-based batch processing.
 - `production.py` owns **production-facing post-processing**. This is where OCR candidates are grouped, filtered, sorted, and converted into the final stable JSON contract. Logic such as allowed ID whitelisting, OCR character-set filtering, minimum box area filtering, and choosing `ocr_result` belongs here.
+- `face_groups.py` implements the face-group bib attribution pipeline. It loads face group data from the upstream clustering step, builds a spatial affinity model, runs OCR per image in each group, and aggregates spatially-weighted votes into a per-group best guess with confidence and review flags.
 - `setup.py` defines package installation behavior, while the project’s runtime setup helpers are used to download YOLO weights and warm OCR caches through the `raceocr setup` command.
 
-This factoring is deliberate: `infer.py` extracts evidence, `production.py` decides what counts as a valid production answer, and `cli.py` ties the system together.
+This factoring is deliberate: `infer.py` extracts evidence, `production.py` decides what counts as a valid production answer, `face_groups.py` handles cross-image attribution, and `cli.py` ties the system together.
 
 ---
 
