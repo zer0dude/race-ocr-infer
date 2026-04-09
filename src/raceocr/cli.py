@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 from typing import List, Optional
 
 
@@ -559,6 +560,8 @@ def _cmd_infer(args: argparse.Namespace) -> int:
     from .io import make_run_dir, write_params, write_results
     from .util import get_env_info
 
+    started_at = datetime.now(timezone.utc)
+
     img_path = Path(args.img)
     input_label = img_path.stem if img_path.name else "image"
 
@@ -678,6 +681,12 @@ def _cmd_infer(args: argparse.Namespace) -> int:
 
     prod = infer_to_production_json(results)
 
+    finished_at = datetime.now(timezone.utc)
+    duration_s = (finished_at - started_at).total_seconds()
+    prod["meta"]["started_at"] = started_at.isoformat()
+    prod["meta"]["finished_at"] = finished_at.isoformat()
+    prod["meta"]["duration_seconds"] = round(duration_s, 3)
+
     runs_dir = Path(args.runs_dir)
     out_path = make_production_out_path(
         mode="infer",
@@ -690,6 +699,9 @@ def _cmd_infer(args: argparse.Namespace) -> int:
     print(f"[infer] production json: {out_path}")
 
     print(f"[infer] wrote artifacts to: {run_dir}")
+    print(f"[infer] started:  {started_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"[infer] finished: {finished_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"[infer] duration: {duration_s:.1f}s")
     return 0
 
 
@@ -709,6 +721,8 @@ def _cmd_album(args: argparse.Namespace) -> int:
     )
     from .io import make_run_dir, write_params, write_results
     from .util import get_env_info, write_json
+
+    started_at = datetime.now(timezone.utc)
 
     dir_path = Path(args.dir)
     if not dir_path.exists() or not dir_path.is_dir():
@@ -892,6 +906,12 @@ def _cmd_album(args: argparse.Namespace) -> int:
 
     prod = album_to_production_json(results)
 
+    finished_at = datetime.now(timezone.utc)
+    duration_s = (finished_at - started_at).total_seconds()
+    prod["meta"]["started_at"] = started_at.isoformat()
+    prod["meta"]["finished_at"] = finished_at.isoformat()
+    prod["meta"]["duration_seconds"] = round(duration_s, 3)
+
     runs_dir = Path(args.runs_dir)
     out_path = make_production_out_path(
         mode="album",
@@ -906,6 +926,9 @@ def _cmd_album(args: argparse.Namespace) -> int:
     print(f"[album] wrote artifacts to: {run_dir}")
     if failed_images:
         print(f"[album] WARNING: {len(failed_images)} images failed (see artifacts + production meta.failed_images).")
+    print(f"[album] started:  {started_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"[album] finished: {finished_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"[album] duration: {duration_s:.1f}s")
     return 0
 
 
@@ -915,6 +938,8 @@ def _cmd_face_groups(args: argparse.Namespace) -> int:
     from .face_groups import run_face_groups
     from .io import make_run_dir, write_params
     from .util import get_env_info
+
+    started_at = datetime.now(timezone.utc)
 
     groups_path = Path(args.groups)
     embeddings_dir = Path(args.embeddings_dir)
@@ -961,9 +986,16 @@ def _cmd_face_groups(args: argparse.Namespace) -> int:
         images_dir=images_dir,
         out_path=out_path,
         params=params,
+        started_at=started_at,
     )
 
+    finished_at = datetime.now(timezone.utc)
+    duration_s = (finished_at - started_at).total_seconds()
+
     print(f"[face-groups] wrote artifacts to: {run_dir}")
+    print(f"[face-groups] started:  {started_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"[face-groups] finished: {finished_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"[face-groups] duration: {duration_s:.1f}s")
     return 0
 
 

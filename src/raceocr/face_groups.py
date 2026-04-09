@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -247,6 +248,7 @@ def run_face_groups(
     images_dir: Path,
     out_path: Path,
     params: Dict[str, Any],
+    started_at: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """
     Main entry point: load face groups, run OCR per image, attribute bib numbers,
@@ -291,6 +293,11 @@ def run_face_groups(
         if result.get("needs_review"):
             num_needs_review += 1
 
+    finished_at = datetime.now(timezone.utc)
+    if started_at is None:
+        started_at = finished_at
+    duration_s = (finished_at - started_at).total_seconds()
+
     meta_out = {
         "approach": "spatial_weighted",
         "spatial_sigma": float(params.get("spatial_sigma", 1.5)),
@@ -305,6 +312,9 @@ def run_face_groups(
         "groups_json": str(groups_path),
         "embeddings_dir": str(embeddings_dir),
         "images_dir": str(images_dir),
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "duration_seconds": round(duration_s, 3),
     }
 
     output = {
