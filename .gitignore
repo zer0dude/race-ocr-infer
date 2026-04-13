@@ -40,7 +40,7 @@ crops/
 vis/
 runs/
 tmp/
-tests/
+tests/runs
 
 # --- Model weights / downloads / caches ---
 *.pt
