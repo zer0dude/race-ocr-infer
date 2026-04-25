@@ -21,19 +21,6 @@ def load_face_meta(embeddings_dir: Path, entry_id: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-def build_image_index(images_dir: Path) -> Dict[str, Path]:
-    """
-    Walk images_dir recursively and build a {filename -> full_path} index.
-    If the same filename appears in multiple subdirectories, last one wins.
-    """
-    index: Dict[str, Path] = {}
-    for ext in ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp", "*.tif", "*.tiff",
-                "*.JPG", "*.JPEG", "*.PNG", "*.BMP", "*.WEBP", "*.TIF", "*.TIFF"):
-        for p in images_dir.rglob(ext):
-            index[p.name] = p
-    return index
-
-
 def spatial_affinity(
     face_bbox: List[float],
     bib_xyxy: List[float],
@@ -99,39 +86,23 @@ def spatial_affinity(
 
 def attribute_group(
     entries: List[str],
-    image_index: Dict[str, Path],
     embeddings_dir: Path,
-    yolo_model: Any,
-    ocr: Any,
+    image_boxes: Dict[str, List[Dict]],
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Run bib OCR for all images in a face group and attribute a bib number
-    using spatially-weighted voting.
+    Attribute a bib number to a face group using spatially-weighted voting over
+    pre-computed album boxes.
 
-    Returns a summary dict with best_guess, confidence, needs_review, etc.
+    image_boxes: {bare_filename -> boxes list from album production JSON}
+
+    Returns a summary dict with best_guess, confidence, status, etc.
     """
-    from .infer import detections_to_dict, run_ocr_on_crop_paths, run_yolo_detect, save_crops
-    from .production import infer_to_production_json
-
-    yolo_conf = float(params.get("yolo_conf", 0.86))
-    yolo_iou = float(params.get("yolo_iou", 0.45))
-    imgsz = int(params.get("imgsz", 1280))
-    device = params.get("device")
-    yolo_classes = params.get("yolo_classes")
-    ocr_conf = float(params.get("ocr_conf", 0.95))
-    pad_frac = float(params.get("pad", 0.01))
-    delete_crops = bool(params.get("delete_crops", False))
-    allowed_ids = params.get("allowed_ids")
-    ocr_char_set = params.get("ocr_char_set", "numeric")
-    min_box_area = float(params.get("min_box_area", 10000.0))
     sigma = float(params.get("spatial_sigma", 1.0))
     max_bib_dist_factor = float(params.get("max_bib_dist_factor", 1.0))
     flag_threshold = float(params.get("flag_threshold", 0.5))
     ambiguity_margin = float(params.get("ambiguity_margin", 0.15))
-    crops_base_dir: Optional[Path] = params.get("crops_base_dir")
 
-    # Accumulate weighted votes: text -> total_weight
     vote_totals: Dict[str, float] = {}
     num_images_with_bibs = 0
     num_plausible_bib_detections = 0
@@ -139,7 +110,6 @@ def attribute_group(
     seen_source_images: set = set()
 
     for entry_id in entries:
-        # Load face metadata
         try:
             meta = load_face_meta(embeddings_dir, entry_id)
         except Exception:
@@ -150,98 +120,38 @@ def attribute_group(
         if not orig_filename or not face_bbox or len(face_bbox) != 4:
             continue
 
-        img_path = image_index.get(orig_filename)
-        if img_path is None or not img_path.exists():
-            continue
-
+        # Track source images regardless of whether boxes are found
         if orig_filename not in seen_source_images:
             source_images.append(orig_filename)
             seen_source_images.add(orig_filename)
 
-        # Run YOLO + OCR
-        try:
-            dets = run_yolo_detect(
-                model=yolo_model,
-                img_path=img_path,
-                conf=yolo_conf,
-                iou=yolo_iou,
-                imgsz=imgsz,
-                device=device,
-                classes=yolo_classes,
-            )
-
-            if not dets:
-                continue
-
-            if crops_base_dir is not None:
-                effective_crops_dir = crops_base_dir / entry_id
-            else:
-                effective_crops_dir = Path("/tmp/raceocr_facegroups") / entry_id
-
-            crop_meta = save_crops(
-                img_path=img_path,
-                detections=dets,
-                crops_dir=effective_crops_dir,
-                pad_frac=pad_frac,
-            )
-
-            ocr_candidates = run_ocr_on_crop_paths(
-                ocr=ocr,
-                crop_meta=crop_meta,
-                ocr_conf=ocr_conf,
-            )
-
-            img_results = {
-                "input_image_path": str(img_path),
-                "detections": detections_to_dict(dets),
-                "candidate_filter": {
-                    "allowed_ids": allowed_ids,
-                    "ocr_char_set": ocr_char_set,
-                    "min_box_area": min_box_area,
-                },
-                "ocr": {"conf": ocr_conf},
-                "ocr_candidates": ocr_candidates,
-            }
-            prod = infer_to_production_json(img_results)
-
-            if delete_crops:
-                for cm in crop_meta:
-                    p = cm.get("crop_path")
-                    if p:
-                        try:
-                            Path(p).unlink(missing_ok=True)
-                        except Exception:
-                            pass
-
-            boxes = prod.get("boxes") or []
-            valid_boxes = [b for b in boxes if b.get("ocr_result")]
-            if not valid_boxes:
-                continue
-
-            num_images_with_bibs += 1
-
-            for box in valid_boxes:
-                text = box["ocr_result"]
-                box_conf = float(box.get("box_confidence") or 0.0)
-                ocr_conf_val = float(box.get("ocr_confidence") or 0.0)
-                bib_xyxy = box.get("xyxy") or []
-
-                if len(bib_xyxy) != 4:
-                    continue
-
-                affinity = spatial_affinity(
-                    face_bbox, bib_xyxy,
-                    sigma=sigma,
-                    max_bib_dist_factor=max_bib_dist_factor,
-                )
-                if affinity > 0:
-                    num_plausible_bib_detections += 1
-                weight = box_conf * ocr_conf_val * affinity
-
-                vote_totals[text] = vote_totals.get(text, 0.0) + weight
-
-        except Exception:
+        boxes = image_boxes.get(orig_filename, [])
+        # Album output is pre-filtered; only keep boxes with a non-empty ocr_result
+        valid_boxes = [b for b in boxes if b.get("ocr_result")]
+        if not valid_boxes:
             continue
+
+        num_images_with_bibs += 1
+
+        for box in valid_boxes:
+            text = box["ocr_result"]
+            box_conf = float(box.get("box_confidence") or 0.0)
+            ocr_conf_val = float(box.get("ocr_confidence") or 0.0)
+            bib_xyxy = box.get("xyxy") or []
+
+            if len(bib_xyxy) != 4:
+                continue
+
+            affinity = spatial_affinity(
+                face_bbox, bib_xyxy,
+                sigma=sigma,
+                max_bib_dist_factor=max_bib_dist_factor,
+            )
+            if affinity > 0:
+                num_plausible_bib_detections += 1
+            weight = box_conf * ocr_conf_val * affinity
+
+            vote_totals[text] = vote_totals.get(text, 0.0) + weight
 
     # Aggregate
     if not vote_totals or num_plausible_bib_detections < 2:
@@ -288,36 +198,30 @@ def attribute_group(
 def run_face_groups(
     groups_path: Path,
     embeddings_dir: Path,
-    images_dir: Path,
+    album_results_path: Path,
     out_path: Path,
     params: Dict[str, Any],
     started_at: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """
-    Main entry point: load face groups, run OCR per image, attribute bib numbers,
-    write results JSON to out_path.
+    Main entry point: load face groups and album OCR results, attribute bib numbers
+    via spatial voting, write results JSON to out_path.
     """
-    from .config import default_cache_dir, yolo_cache_path
-    from .infer import init_paddle_ocr, load_yolo
     from .util import write_json
 
     groups = load_groups(groups_path)
     num_groups = len(groups)
     print(f"[face-groups] loaded {num_groups} groups from {groups_path}")
 
-    image_index = build_image_index(images_dir)
-    print(f"[face-groups] indexed {len(image_index)} images under {images_dir}")
+    with open(album_results_path, "r", encoding="utf-8") as f:
+        album_data = json.load(f)
 
-    # Resolve YOLO weights
-    yolo_weights = params.get("yolo_weights")
-    weights_path = Path(yolo_weights) if yolo_weights else yolo_cache_path(default_cache_dir())
-    if not weights_path.exists():
-        raise SystemExit(
-            f"YOLO weights not found at {weights_path}. Run `raceocr setup` or pass --yolo-weights."
-        )
+    image_boxes: Dict[str, List[Dict]] = {}
+    for img_entry in album_data.get("images") or []:
+        fname = Path(img_entry.get("orig_img") or "").name
+        image_boxes[fname] = img_entry.get("boxes") or []
 
-    yolo_model = load_yolo(weights_path)
-    ocr = init_paddle_ocr(ocr_device=params.get("ocr_device", "cpu"))
+    print(f"[face-groups] loaded album results from {album_results_path} ({len(image_boxes)} images indexed)")
 
     groups_out: Dict[str, Any] = {}
 
@@ -325,10 +229,8 @@ def run_face_groups(
         print(f"[face-groups] {i}/{num_groups} {group_id} ({len(entries)} entries)...")
         result = attribute_group(
             entries=entries,
-            image_index=image_index,
             embeddings_dir=embeddings_dir,
-            yolo_model=yolo_model,
-            ocr=ocr,
+            image_boxes=image_boxes,
             params=params,
         )
         groups_out[group_id] = result
@@ -360,10 +262,6 @@ def run_face_groups(
         "max_bib_dist_factor": float(params.get("max_bib_dist_factor", 1.0)),
         "flag_threshold": float(params.get("flag_threshold", 0.5)),
         "ambiguity_margin": float(params.get("ambiguity_margin", 0.15)),
-        "yolo_conf": float(params.get("yolo_conf", 0.86)),
-        "ocr_conf": float(params.get("ocr_conf", 0.95)),
-        "min_box_area": float(params.get("min_box_area", 10000.0)),
-        "ocr_char_set": params.get("ocr_char_set", "numeric"),
         "num_groups_total": num_groups,
         "num_confident": num_confident,
         "num_multiple_plausible_bib_ids": num_multiple,
@@ -371,7 +269,7 @@ def run_face_groups(
         "num_insufficient_plausible_bibs": num_insufficient,
         "groups_json": str(groups_path),
         "embeddings_dir": str(embeddings_dir),
-        "images_dir": str(images_dir),
+        "album_results": str(album_results_path),
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "duration_seconds": round(duration_s, 3),

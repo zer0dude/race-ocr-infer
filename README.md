@@ -12,6 +12,14 @@ It is part of a larger pipeline. The `face-groups` command bridges the output of
 
 ---
 
+## Requirements
+
+- Python 3.10+
+- **CUDA 12.8** — required for GPU inference with the PyTorch version used by Ultralytics YOLO. CPU-only mode works without CUDA (omit `--device` to let Ultralytics auto-detect, or pass `--device cpu` explicitly).
+- See `pyproject.toml` for Python package dependencies.
+
+---
+
 ## What you get
 
 For each run, `raceocr` produces:
@@ -42,6 +50,8 @@ pip install -U pip
 ```bash
 pip install -e .
 ```
+
+> **GPU note:** CUDA 12.8 is required for YOLO GPU inference. If you intend to run with `--device 0`, ensure CUDA 12.8 is installed on your system before installing the package.
 
 ### 3) Download weights and warm caches
 
@@ -110,13 +120,21 @@ raceocr infer --img path/to/image.jpg --create-vis --delete-crops
 
 ### `album` — batch inference over a folder of images
 
-`album` is **batch inferencing mode**: it runs the same pipeline as `infer` over all images in a folder (non-recursive), then produces a **single stitched production JSON** containing the per-image results.
+`album` is **batch inferencing mode**: it runs the same pipeline as `infer` over all images in a folder, then produces a **single stitched production JSON** containing the per-image results.
 
-Minimal example:
+Minimal example (top-level images only):
 
 ```bash
 raceocr album --dir path/to/album_folder
 ```
+
+Run over an image tree where photos are organized in subdirectories (e.g. by bib number or photographer):
+
+```bash
+raceocr album --dir path/to/image_tree --recursive --output-name album_all.json
+```
+
+When `--recursive` is used, `orig_img` paths in the production JSON include the full path through subdirectories. `face-groups` strips to the bare filename when building its lookup index, so subdirectory layout is transparent.
 
 Use a whitelist of valid IDs for the album:
 
@@ -150,7 +168,31 @@ raceocr album --dir path/to/album_folder --create-vis --delete-crops
 
 ### `face-groups` — attribute bib numbers to face groups
 
-`face-groups` is designed for integration with an upstream **face clustering** step. It takes as input a set of face groups (images grouped by the face that appears in them, with bounding boxes per detected face) and runs bib OCR on each image. For each face group it produces a **best-guess bib number** with a confidence score, using **spatially-weighted voting** to distinguish the target runner's own bib from those of companion runners.
+`face-groups` is designed for integration with an upstream **face clustering** step. It is a **pure spatial-voting consumer**: it reads pre-computed bib boxes from an album production JSON and attributes a bib number to each face group using spatially-weighted voting. All YOLO and OCR parameters are configured at the `album` step.
+
+**Two-step workflow:**
+
+**Step 1** — run `album --recursive` over the full image tree (YOLO + OCR, GPU-intensive):
+
+```bash
+raceocr album \
+  --dir          path/to/image_tree \
+  --recursive \
+  --device       0 \
+  --delete-crops \
+  --runs-dir     path/to/output \
+  --output-name  album_allimages.json
+```
+
+**Step 2** — run `face-groups`, consuming the album output (pure CPU, fast):
+
+```bash
+raceocr face-groups \
+  --groups         path/to/refined_groups.json \
+  --embeddings-dir path/to/embeddings \
+  --album-results  path/to/output/album_allimages.json \
+  --out            path/to/output/face_groups_result.json
+```
 
 **How attribution works:**  
 For every bib detected in every image of a group, a vote weight is computed as:
@@ -171,16 +213,6 @@ Bibs that pass both gates are then scored:
 If no bib in any image passes the plausibility gates, the group returns `best_guess: null` — this correctly handles bystanders (who have no bib) and athletes whose bib was never in a plausible position.
 
 Votes accumulate per OCR string across all images. The string with the highest total weight is the `best_guess`. Each group is assigned a `status` string (see output schema below) based on confidence, ambiguity, and cross-group duplicate detection.
-
-Minimal example:
-
-```bash
-raceocr face-groups \
-  --groups  path/to/refined_groups.json \
-  --embeddings-dir path/to/embeddings \
-  --images-dir path/to/original/images \
-  --out path/to/output.json
-```
 
 #### Input: `refined_groups.json`
 
@@ -256,15 +288,17 @@ Noise entries are skipped — they are faces the clustering model could not conf
     "max_bib_dist_factor": 1.0,
     "flag_threshold": 0.5,
     "ambiguity_margin": 0.15,
-    "yolo_conf": 0.86,
-    "ocr_conf": 0.95,
-    "min_box_area": 10000.0,
-    "ocr_char_set": "numeric",
     "num_groups_total": 157,
     "num_confident": 65,
     "num_multiple_plausible_bib_ids": 30,
     "num_cross_group_duplicate": 14,
-    "num_insufficient_plausible_bibs": 48
+    "num_insufficient_plausible_bibs": 48,
+    "groups_json": "path/to/refined_groups.json",
+    "embeddings_dir": "path/to/embeddings",
+    "album_results": "path/to/album_allimages.json",
+    "started_at": "2026-04-25T10:00:00+00:00",
+    "finished_at": "2026-04-25T10:00:02+00:00",
+    "duration_seconds": 2.1
   }
 }
 ```
@@ -476,6 +510,7 @@ Required:
 - `--dir PATH` album folder
 
 Main options:
+- `--recursive` search the folder recursively for images (default: off, top-level only)
 - `--ocr-conf FLOAT` (default: `0.95`)
 - `--allowed-ids "a,b,c"` optional whitelist of valid OCR outputs
 - `--ocr-char-set {numeric,alnum,any}` (default: `numeric`)
@@ -501,7 +536,7 @@ Artifacts / production output:
 Required:
 - `--groups PATH` refined_groups.json from the upstream face clustering step
 - `--embeddings-dir PATH` folder containing `<entry>_meta.json` files
-- `--images-dir PATH` folder containing original images (searched recursively)
+- `--album-results PATH` album production JSON produced by `raceocr album --recursive`
 - `--out PATH` output JSON path
 
 Attribution tuning:
@@ -509,21 +544,6 @@ Attribution tuning:
 - `--max-bib-dist FLOAT` hard horizontal cutoff in bib-widths from face center (default: `1.0`); bibs whose nearest edge exceeds this are discarded entirely
 - `--flag-threshold FLOAT` confidence below which a group receives `status=multiple_plausible_bib_ids` (default: `0.5`)
 - `--ambiguity-margin FLOAT` if runner-up weight ÷ top weight exceeds `1 - margin`, group receives `status=multiple_plausible_bib_ids` (default: `0.15`)
-
-Main OCR / YOLO options (same defaults as `infer` / `album`):
-- `--ocr-conf FLOAT` (default: `0.95`)
-- `--ocr-char-set {numeric,alnum,any}` (default: `numeric`)
-- `--min-box-area FLOAT` (default: `10000`)
-- `--allowed-ids "a,b,c"` optional whitelist
-- `--ocr-device {cpu,gpu}` (default: `cpu`)
-- `--yolo-conf FLOAT` (default: `0.86`)
-- `--yolo-iou FLOAT` (default: `0.45`)
-- `--yolo-classes ...` (default: `race_bibs`)
-- `--imgsz INT` (default: `1280`)
-- `--device STR` YOLO device (default: Ultralytics auto)
-- `--yolo-weights PATH` (default: cached weights)
-- `--pad FLOAT` (default: `0.01`)
-- `--delete-crops` delete crops after OCR (default: off)
 
 Artifacts:
 - `--out-dir PATH` artifacts directory (default: `./artifacts`)
@@ -536,16 +556,30 @@ The tool is intentionally split by responsibility so that OCR extraction, orches
 
 - `cli.py` is the command-line entrypoint. It parses arguments, orchestrates the run, writes debug artifacts, and calls production conversion at the end.
 - `infer.py` contains the single-image pipeline building blocks: YOLO loading and inference, rendering, crop creation, PaddleOCR initialization, and raw OCR candidate extraction.
-- `album.py` is intentionally small and focused. It provides album-level helpers such as listing input images for folder-based batch processing.
+- `album.py` is intentionally small and focused. It provides album-level helpers such as listing input images for folder-based batch processing (flat or recursive).
 - `production.py` owns **production-facing post-processing**. This is where OCR candidates are grouped, filtered, sorted, and converted into the final stable JSON contract. Logic such as allowed ID whitelisting, OCR character-set filtering, minimum box area filtering, and choosing `ocr_result` belongs here.
-- `face_groups.py` implements the face-group bib attribution pipeline. It loads face group data from the upstream clustering step, builds a spatial affinity model, runs OCR per image in each group, and aggregates spatially-weighted votes into a per-group best guess with confidence and review flags.
-- `setup.py` defines package installation behavior, while the project’s runtime setup helpers are used to download YOLO weights and warm OCR caches through the `raceocr setup` command.
+- `face_groups.py` implements the face-group bib attribution pipeline. It loads face group data from the upstream clustering step, reads pre-computed bib boxes from an album production JSON (produced by `raceocr album --recursive`), and aggregates spatially-weighted votes into a per-group best guess with confidence and review flags. All YOLO and OCR computation is delegated to the `album` step.
+- `setup.py` defines package installation behavior, while the project's runtime setup helpers are used to download YOLO weights and warm OCR caches through the `raceocr setup` command.
 
 This factoring is deliberate: `infer.py` extracts evidence, `production.py` decides what counts as a valid production answer, `face_groups.py` handles cross-image attribution, and `cli.py` ties the system together.
 
 ---
 
 ## Troubleshooting
+
+### CUDA 12.8 requirement for GPU inference
+
+YOLO uses PyTorch via Ultralytics, which requires **CUDA 12.8** for GPU inference. Running on a machine with a different CUDA version and passing `--device 0` will produce CUDA-related errors.
+
+To check your CUDA version:
+
+```bash
+nvcc --version
+# or
+nvidia-smi
+```
+
+If your CUDA version does not match, either install CUDA 12.8 or run with `--device cpu` (slower, but fully compatible on any machine).
 
 ### YOLO GPU + PaddleOCR GPU conflicts
 
