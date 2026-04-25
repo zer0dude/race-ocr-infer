@@ -4,7 +4,7 @@ import json
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def load_groups(groups_json_path: Path) -> Dict[str, List[str]]:
@@ -198,7 +198,7 @@ def attribute_group(
 def run_face_groups(
     groups_path: Path,
     embeddings_dir: Path,
-    album_results_path: Path,
+    album_results_paths: List[Path],
     out_path: Path,
     params: Dict[str, Any],
     started_at: Optional[datetime] = None,
@@ -213,15 +213,34 @@ def run_face_groups(
     num_groups = len(groups)
     print(f"[face-groups] loaded {num_groups} groups from {groups_path}")
 
-    with open(album_results_path, "r", encoding="utf-8") as f:
-        album_data = json.load(f)
-
     image_boxes: Dict[str, List[Dict]] = {}
-    for img_entry in album_data.get("images") or []:
-        fname = Path(img_entry.get("orig_img") or "").name
-        image_boxes[fname] = img_entry.get("boxes") or []
+    skipped_images: List[Tuple[str, Path]] = []
 
-    print(f"[face-groups] loaded album results from {album_results_path} ({len(image_boxes)} images indexed)")
+    for album_path in album_results_paths:
+        with open(album_path, "r", encoding="utf-8") as f:
+            album_data = json.load(f)
+        added = 0
+        skipped = 0
+        for img_entry in album_data.get("images") or []:
+            fname = Path(img_entry.get("orig_img") or "").name
+            if not fname:
+                continue
+            if fname in image_boxes:
+                skipped_images.append((fname, album_path))
+                skipped += 1
+            else:
+                image_boxes[fname] = img_entry.get("boxes") or []
+                added += 1
+        print(f"[face-groups] loaded {album_path} ({added} images added, {skipped} skipped — filename already indexed)")
+
+    if skipped_images:
+        print(f"\n[face-groups] WARNING: {len(skipped_images)} image(s) skipped due to bare-filename collisions (first-seen wins):")
+        for fname, src in skipped_images:
+            print(f"  '{fname}'  from  {src}")
+        print("[face-groups] To include these images, re-run raceocr album on just the skipped files with a unique output name and add it to --album-results.\n")
+
+    collision_count = len(skipped_images)
+    print(f"[face-groups] {len(image_boxes)} unique images indexed across {len(album_results_paths)} album file(s)")
 
     groups_out: Dict[str, Any] = {}
 
@@ -267,9 +286,10 @@ def run_face_groups(
         "num_multiple_plausible_bib_ids": num_multiple,
         "num_cross_group_duplicate": num_duplicate,
         "num_insufficient_plausible_bibs": num_insufficient,
+        "num_filename_collisions": collision_count,
         "groups_json": str(groups_path),
         "embeddings_dir": str(embeddings_dir),
-        "album_results": str(album_results_path),
+        "album_results": [str(p) for p in album_results_paths],
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "duration_seconds": round(duration_s, 3),

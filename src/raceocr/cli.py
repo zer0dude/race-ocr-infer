@@ -390,8 +390,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_fg.add_argument(
         "--album-results",
+        nargs="+",
+        metavar="PATH",
         required=True,
-        help="Path to the album production JSON produced by `raceocr album --recursive`.",
+        help="Path(s) to album production JSON(s) from `raceocr album`. Pass multiple paths to combine several batch runs.",
     )
     p_fg.add_argument(
         "--out",
@@ -878,16 +880,19 @@ def _cmd_face_groups(args: argparse.Namespace) -> int:
 
     groups_path = Path(args.groups)
     embeddings_dir = Path(args.embeddings_dir)
-    album_results_path = Path(args.album_results)
+    album_results_paths = [Path(p) for p in args.album_results]
     out_path = Path(args.out)
 
     for label, p in [
         ("--groups", groups_path),
         ("--embeddings-dir", embeddings_dir),
-        ("--album-results", album_results_path),
     ]:
         if not p.exists():
             raise SystemExit(f"{label} path does not exist: {p}")
+
+    for p in album_results_paths:
+        if not p.exists():
+            raise SystemExit(f"--album-results path does not exist: {p}")
 
     run_dir = make_run_dir("face-groups", groups_path.stem, args.out_dir)
 
@@ -895,7 +900,7 @@ def _cmd_face_groups(args: argparse.Namespace) -> int:
         "command": "face-groups",
         "groups": str(groups_path),
         "embeddings_dir": str(embeddings_dir),
-        "album_results": str(album_results_path),
+        "album_results": [str(p) for p in album_results_paths],
         "out": str(out_path),
         "spatial_sigma": float(args.spatial_sigma),
         "max_bib_dist_factor": float(args.max_bib_dist),
@@ -909,7 +914,7 @@ def _cmd_face_groups(args: argparse.Namespace) -> int:
     run_face_groups(
         groups_path=groups_path,
         embeddings_dir=embeddings_dir,
-        album_results_path=album_results_path,
+        album_results_paths=album_results_paths,
         out_path=out_path,
         params=params,
         started_at=started_at,

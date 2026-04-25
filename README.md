@@ -194,6 +194,18 @@ raceocr face-groups \
   --out            path/to/output/face_groups_result.json
 ```
 
+If images were processed in **multiple album batches** (e.g. different photographers), pass all album JSONs to a single `face-groups` run:
+
+```bash
+raceocr face-groups \
+  --groups         path/to/refined_groups.json \
+  --embeddings-dir path/to/embeddings \
+  --album-results  path/to/album_morning.json path/to/album_afternoon.json \
+  --out            path/to/face_groups_result.json
+```
+
+If two album files contain an image with the same bare filename, the **first file's entry wins** and the duplicate is skipped. A full list of skipped images (filename + source album path) is printed at the end of the run. To include skipped images, re-run `raceocr album` on just those files with a unique output name and add it to `--album-results`.
+
 **How attribution works:**  
 For every bib detected in every image of a group, a vote weight is computed as:
 
@@ -293,9 +305,10 @@ Noise entries are skipped — they are faces the clustering model could not conf
     "num_multiple_plausible_bib_ids": 30,
     "num_cross_group_duplicate": 14,
     "num_insufficient_plausible_bibs": 48,
+    "num_filename_collisions": 0,
     "groups_json": "path/to/refined_groups.json",
     "embeddings_dir": "path/to/embeddings",
-    "album_results": "path/to/album_allimages.json",
+    "album_results": ["path/to/album_morning.json", "path/to/album_afternoon.json"],
     "started_at": "2026-04-25T10:00:00+00:00",
     "finished_at": "2026-04-25T10:00:02+00:00",
     "duration_seconds": 2.1
@@ -536,7 +549,7 @@ Artifacts / production output:
 Required:
 - `--groups PATH` refined_groups.json from the upstream face clustering step
 - `--embeddings-dir PATH` folder containing `<entry>_meta.json` files
-- `--album-results PATH` album production JSON produced by `raceocr album --recursive`
+- `--album-results PATH [PATH ...]` one or more album production JSONs from `raceocr album`; pass multiple paths to combine several batch runs — on bare-filename collisions the first file wins and skipped images are listed at the end of the run
 - `--out PATH` output JSON path
 
 Attribution tuning:
